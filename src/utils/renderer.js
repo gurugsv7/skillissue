@@ -301,39 +301,13 @@ async function getProviderSecrets(accessToken = null, options = {}) {
 }
 
 async function initializeLocal(profile = 'interview') {
-    const prefs = await storage.getPreferences();
-    const ollamaHost = prefs.ollamaHost || 'http://127.0.0.1:11434';
-    const ollamaModel = prefs.ollamaModel || 'llama3.1';
-    const whisperModel = prefs.whisperModel || 'Xenova/whisper-small';
-    const customPrompt = buildCombinedContext(prefs);
-
-    const success = await ipcRenderer.invoke('initialize-local', ollamaHost, ollamaModel, whisperModel, profile, customPrompt);
-    if (success) {
-        hintio.setStatus('Local AI Live');
-        return true;
-    } else {
-        hintio.setStatus('error');
-        return false;
-    }
+    hintio.setStatus('Access token mode only');
+    return false;
 }
 
 async function initializeCloud(profile = 'interview') {
-    const creds = await storage.getCredentials();
-    const token = creds.cloudToken;
-    if (!token || !token.trim()) {
-        hintio.setStatus('error');
-        return false;
-    }
-
-    const prefs = await storage.getPreferences();
-    const success = await ipcRenderer.invoke('initialize-cloud', token, profile, buildCombinedContext(prefs));
-    if (success) {
-        hintio.setStatus('Live');
-        return true;
-    } else {
-        hintio.setStatus('error');
-        return false;
-    }
+    hintio.setStatus('Access token mode only');
+    return false;
 }
 
 // Listen for status updates
@@ -1347,8 +1321,6 @@ const hintio = {
 
     // Core functionality
     initializeAzure,
-    initializeCloud,
-    initializeLocal,
     startCapture,
     stopCapture,
     sendTextMessage,

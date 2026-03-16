@@ -713,7 +713,12 @@ export class HintioApp extends LitElement {
 
     // ── Session start ──
 
-    async handleStart() {
+    async handleStart(accessToken = '') {
+        const normalizedToken = String(accessToken || '').trim();
+        if (normalizedToken) {
+            await hintio.storage.setAccessToken(normalizedToken);
+        }
+
         // If no voice profile, go to calibration first
         if (!this._hasVoiceProfile && !this._calibrationSkipped) {
             this.currentView = 'calibration';
@@ -757,54 +762,36 @@ export class HintioApp extends LitElement {
     }
 
     _showMainViewTokenError(message) {
-        const mainView = this.shadowRoot.querySelector('main-view');
-        if (mainView && mainView.triggerApiKeyError) {
-            mainView.triggerApiKeyError(message);
+        const showError = () => {
+            const mainView = this.shadowRoot.querySelector('main-view');
+            if (mainView && mainView.triggerApiKeyError) {
+                mainView.triggerApiKeyError(message);
+            }
+        };
+
+        if (this.currentView !== 'main') {
+            this.currentView = 'main';
+            this.requestUpdate();
+            setTimeout(showError, 0);
+            return;
         }
+
+        showError();
     }
 
     async _startSession() {
-        const prefs = await hintio.storage.getPreferences();
         const creds = await hintio.storage.getCredentials();
         const accessToken = (creds.cloudToken || '').trim();
-
-        let providerMode = prefs.providerMode || 'byok';
-        if (providerMode === 'cloud' && accessToken.startsWith('SKI-')) {
-            providerMode = 'byok';
-            hintio.storage.updatePreference('providerMode', 'byok').catch(() => {});
+        if (!accessToken) {
+            this._showMainViewTokenError('Access token is required.');
+            return;
         }
 
-        if (providerMode === 'cloud') {
-            if (!creds.cloudToken || creds.cloudToken.trim() === '') {
-                this._showMainViewTokenError('Access token is required.');
-                return;
-            }
-
-            const success = await hintio.initializeCloud(this.selectedProfile);
-            if (!success) {
-                this._showMainViewTokenError('Unable to start cloud session. Check your access token.');
-                return;
-            }
-        } else if (providerMode === 'local') {
-            const success = await hintio.initializeLocal(this.selectedProfile);
-            if (!success) {
-                this._showMainViewTokenError('Local AI failed to initialize.');
-                return;
-            }
-        } else {
-            const creds = await hintio.storage.getCredentials();
-            const accessToken = creds.cloudToken || '';
-            if (!accessToken || accessToken.trim() === '') {
-                this._showMainViewTokenError('Access token is required.');
-                return;
-            }
-
-            const success = await hintio.initializeAzure(this.selectedProfile, this.selectedLanguage);
-            if (!success) {
-                const initError = typeof hintio.getLastInitError === 'function' ? hintio.getLastInitError() : '';
-                this._showMainViewTokenError(initError || 'Access token is invalid or expired.');
-                return;
-            }
+        const success = await hintio.initializeAzure(this.selectedProfile, this.selectedLanguage);
+        if (!success) {
+            const initError = typeof hintio.getLastInitError === 'function' ? hintio.getLastInitError() : '';
+            this._showMainViewTokenError(initError || 'Access token is invalid or expired.');
+            return;
         }
 
         hintio.startCapture(this.selectedScreenshotInterval, this.selectedImageQuality);
@@ -925,7 +912,7 @@ export class HintioApp extends LitElement {
                     <main-view
                         .selectedProfile=${this.selectedProfile}
                         .onProfileChange=${p => this.handleProfileChange(p)}
-                        .onStart=${() => this.handleStart()}
+                        .onStart=${token => this.handleStart(token)}
                         .onExternalLink=${url => this.handleExternalLinkClick(url)}
                         .whisperDownloading=${this._whisperDownloading}
                         .hasVoiceProfile=${this._hasVoiceProfile}

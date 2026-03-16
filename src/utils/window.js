@@ -11,8 +11,7 @@ const LIVE_WIDTH = 850;
 const LIVE_HEIGHT = 400;
 
 function createWindow(sendToRenderer, providerSessionRef) {
-    const isPackaged = require('electron').app.isPackaged;
-    const visibleMode = !isPackaged && process.env.HINTIO_DEBUG_VISIBLE_MODE !== '0';
+    const visibleMode = false;
 
     // Default app shell size for navigation pages
     const workArea = screen.getPrimaryDisplay().workAreaSize;

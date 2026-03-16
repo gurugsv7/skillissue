@@ -14,6 +14,54 @@ if (fs.existsSync(optionalWindowsBundle)) {
     extraResource.push(optionalWindowsBundle);
 }
 
+const requiredVcRuntimeDlls = [
+    'vcruntime140.dll',
+    'vcruntime140_1.dll',
+    'msvcp140.dll',
+];
+
+function resolveSystemDllPath(fileName) {
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const searchDirs = [
+        path.join(systemRoot, 'System32'),
+        path.join(systemRoot, 'SysWOW64'),
+    ];
+
+    for (const dir of searchDirs) {
+        const candidate = path.join(dir, fileName);
+        if (fs.existsSync(candidate)) {
+            return candidate;
+        }
+    }
+
+    return null;
+}
+
+function copyVcRuntimeDllsToApp(appPath) {
+    const missingSources = [];
+
+    for (const dllName of requiredVcRuntimeDlls) {
+        const sourcePath = resolveSystemDllPath(dllName);
+        if (!sourcePath) {
+            missingSources.push(dllName);
+            continue;
+        }
+
+        const targetPath = path.join(appPath, dllName);
+        fs.copyFileSync(sourcePath, targetPath);
+    }
+
+    if (missingSources.length > 0) {
+        throw new Error(`Missing VC++ runtime DLLs on build machine: ${missingSources.join(', ')}`);
+    }
+}
+
+function resolvePackagedOutputPaths(options = {}) {
+    if (Array.isArray(options.outputPaths)) return options.outputPaths;
+    if (typeof options.outputPath === 'string' && options.outputPath) return [options.outputPath];
+    return [];
+}
+
 module.exports = {
     packagerConfig: {
         asar: {
@@ -57,6 +105,20 @@ module.exports = {
         // },
     },
     rebuildConfig: {},
+    hooks: {
+        postPackage: async (forgeConfig, options) => {
+            const outputPaths = resolvePackagedOutputPaths(options);
+            if (outputPaths.length === 0) {
+                throw new Error('No packaged output paths found in postPackage hook');
+            }
+
+            for (const appPath of outputPaths) {
+                if (process.platform === 'win32') {
+                    copyVcRuntimeDllsToApp(appPath);
+                }
+            }
+        },
+    },
     makers: [
         {
             name: '@electron-forge/maker-squirrel',

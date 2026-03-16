@@ -296,8 +296,9 @@ export class MainView extends LitElement {
 
     async _startWithPersistedCredentials() {
         try {
-            await hintio.storage.setAccessToken(this._token.trim());
-            this.onStart();
+            const trimmedToken = this._token.trim();
+            await hintio.storage.setAccessToken(trimmedToken);
+            this.onStart(trimmedToken);
         } catch (error) {
             console.error('Failed to persist access token before start:', error);
             this._tokenErrorMessage = 'Failed to save access token. Please try again.';

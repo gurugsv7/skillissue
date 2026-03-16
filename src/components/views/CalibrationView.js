@@ -924,34 +924,25 @@ export class CalibrationView extends LitElement {
      * Tries: 1) Groq Whisper  2) Azure Speech REST  3) returns empty
      */
     async _transcribeAudio(audioBlob) {
-        const resolved = await window.hintio.getProviderSecrets().catch(() => ({ success: false }));
-        const secrets = resolved?.success ? (resolved.data || {}) : {};
-
-        // Try Groq Whisper first (fast, free, reliable)
-        const groqKey = secrets.groqApiKey || '';
-        if (groqKey) {
-            try {
-                const text = await this._transcribeWithGroqWhisper(audioBlob, groqKey);
-                if (text) return text;
-            } catch (e) {
-                console.warn('Groq Whisper transcription failed:', e);
-            }
+        const accessToken = (await hintio.storage.getAccessToken().catch(() => '')) || '';
+        if (!accessToken.trim()) {
+            throw new Error('Missing access token for calibration transcription');
         }
 
-        // Try Azure Speech REST API
-        try {
-            const azureKey = secrets.azureApiKey || '';
-            const azureEndpoint = secrets.azureEndpoint || '';
-            if (azureKey && azureEndpoint) {
-                const text = await this._transcribeWithAzureSpeech(audioBlob, azureKey, azureEndpoint);
-                if (text) return text;
-            }
-        } catch (e) {
-            console.warn('Azure Speech transcription failed:', e);
+        const { ipcRenderer } = window.require('electron');
+        const audioBase64 = await this._blobToBase64(audioBlob);
+        const result = await ipcRenderer.invoke('auth:calibration-transcribe', {
+            accessToken: accessToken.trim(),
+            audioBase64,
+            mimeType: audioBlob.type || 'audio/webm;codecs=opus',
+            language: this.language || 'en-US',
+        });
+
+        if (!result?.success) {
+            throw new Error(result?.error || 'Calibration transcription failed');
         }
 
-        console.warn('No transcription API available');
-        return '';
+        return (result.text || '').trim();
     }
 
     async _transcribeWithGroqWhisper(audioBlob, apiKey) {
@@ -1058,43 +1049,33 @@ Respond with ONLY the JSON object, no explanation.`;
     }
 
     async _callLLMForAnalysis(prompt) {
-        const resolved = await window.hintio.getProviderSecrets().catch(() => ({ success: false }));
-        const secrets = resolved?.success ? (resolved.data || {}) : {};
-
-        // 1) Azure OpenAI
-        try {
-            const azureKey = secrets.azureApiKey || '';
-            const azureEndpoint = secrets.azureEndpoint || '';
-            const azureDeployment = secrets.azureDeployment || '';
-
-            if (azureKey && azureEndpoint && azureDeployment) {
-                console.log('CalibrationView: using Azure for voice analysis');
-                const result = await this._analyzeWithAzure(
-                    prompt,
-                    azureKey,
-                    azureEndpoint,
-                    azureDeployment
-                );
-                if (result) return result;
-            }
-        } catch (e) {
-            console.warn('Azure analysis failed:', e);
+        const accessToken = (await hintio.storage.getAccessToken().catch(() => '')) || '';
+        if (!accessToken.trim()) {
+            throw new Error('Missing access token for calibration analysis');
         }
 
-        // 2) Groq
-        try {
-            const groqKey = secrets.groqApiKey || '';
-            if (groqKey) {
-                console.log('CalibrationView: using Groq for voice analysis');
-                const result = await this._analyzeWithGroq(prompt, groqKey);
-                if (result) return result;
-            }
-        } catch (e) {
-            console.warn('Groq analysis failed:', e);
+        const { ipcRenderer } = window.require('electron');
+        const result = await ipcRenderer.invoke('auth:calibration-analyze', {
+            accessToken: accessToken.trim(),
+            prompt,
+        });
+
+        if (!result?.success) {
+            throw new Error(result?.error || 'Calibration analysis failed');
         }
 
-        console.error('CalibrationView: no LLM provider available for voice analysis');
-        return null;
+        return result.profile || null;
+    }
+
+    async _blobToBase64(blob) {
+        const buffer = await blob.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const chunkSize = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
     }
 
     async _analyzeWithAzure(prompt, apiKey, endpoint, deployment) {

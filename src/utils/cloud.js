@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const { BrowserWindow } = require('electron');
+const { sanitizeText, ensureProfile } = require('./inputValidation');
 
 let cloudWs = null;
 let isCloudConnected = false;
@@ -31,7 +32,25 @@ function connectCloud(token, profile, userContext) {
     audioChunkCount = 0;
 
     return new Promise((resolve, reject) => {
-        const url = `wss://api.hintio.com/ws?token=${encodeURIComponent(token)}`;
+        const safeToken = sanitizeText(String(token || ''), {
+            fieldName: 'cloud token',
+            maxLength: 256,
+            multiline: false,
+            allowEmpty: false,
+        });
+        if (!/^SKI-[A-Za-z0-9_-]{20,252}$/.test(safeToken)) {
+            reject(new Error('Invalid cloud token format'));
+            return;
+        }
+
+        const safeProfile = ensureProfile(String(profile || 'interview'), 'cloud profile');
+        const safeUserContext = sanitizeText(String(userContext || ''), {
+            fieldName: 'cloud user context',
+            maxLength: 8000,
+            allowEmpty: true,
+        });
+
+        const url = `wss://api.hintio.com/ws?token=${encodeURIComponent(safeToken)}`;
         console.log('[Cloud] Connecting to', url);
 
         cloudWs = new WebSocket(url);
@@ -51,11 +70,11 @@ function connectCloud(token, profile, userContext) {
             // Send config immediately after open
             const config = JSON.stringify({
                 type: 'set_config',
-                profile: profile || 'interview',
-                user_context: userContext || ''
+                profile: safeProfile,
+                user_context: safeUserContext,
             });
             cloudWs.send(config);
-            console.log('[Cloud] Config sent:', profile);
+            console.log('[Cloud] Config sent:', safeProfile);
 
             sendToRenderer('update-status', 'Cloud connected');
             resolve(true);

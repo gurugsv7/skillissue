@@ -19,6 +19,7 @@ const supabaseConfig = require('./supabaseConfig');
 const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud, isCloudActive, setOnTurnComplete } = require('./cloud');
 const azureStt = require('./azureStt');
 const speechStt = require('./speechStt');
+const { enforceIpcRateLimit, enforceNamedRateLimit, ensureStringWithinLimit, hashValue } = require('./abuseProtection');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from providerRuntime.js)
 let _localai = null;
@@ -27,8 +28,8 @@ function getLocalAi() {
     return _localai;
 }
 
-// Provider mode: 'byok', 'cloud', or 'local'
-let currentProviderMode = 'byok';
+// Provider mode: token-only
+let currentProviderMode = 'token';
 
 // Groq conversation history for context
 let groqConversationHistory = [];
@@ -55,6 +56,51 @@ const PROVIDER_SECRETS_CACHE_TTL_MS = 30 * 60 * 1000;
 const MIN_TURN_WORDS = 4;
 const MIN_INTERVIEWER_TURN_GAP_MS = 7000;
 const DUPLICATE_TRANSCRIPT_WINDOW_MS = 25000;
+const RATE_LIMIT_POLICIES = {
+    authResolve: {
+        windowMs: 10 * 60 * 1000,
+        max: 8,
+        blockDurationMs: 15 * 60 * 1000,
+        message: 'Too many login attempts. Please wait before trying again.',
+    },
+    calibrationTranscribe: {
+        windowMs: 5 * 60 * 1000,
+        max: 6,
+        blockDurationMs: 10 * 60 * 1000,
+        message: 'Too many calibration requests. Please try again in a few minutes.',
+    },
+    calibrationAnalyze: {
+        windowMs: 5 * 60 * 1000,
+        max: 10,
+        blockDurationMs: 10 * 60 * 1000,
+        message: 'Too many calibration analysis requests. Please try again shortly.',
+    },
+    initializeAzure: {
+        windowMs: 10 * 60 * 1000,
+        max: 5,
+        blockDurationMs: 10 * 60 * 1000,
+        message: 'Too many session start attempts. Please wait before retrying.',
+    },
+    sendText: {
+        windowMs: 60 * 1000,
+        max: 30,
+        blockDurationMs: 2 * 60 * 1000,
+        message: 'Too many text requests. Slow down and try again.',
+    },
+    sendImage: {
+        windowMs: 60 * 1000,
+        max: 20,
+        blockDurationMs: 2 * 60 * 1000,
+        message: 'Too many screenshot requests. Slow down and try again.',
+    },
+};
+
+function enforceTokenScopedLimit(name, rawToken, policy) {
+    const safeToken = ensureStringWithinLimit(rawToken || '', 256, 'Access token').trim();
+    if (!safeToken) return;
+    const tokenKey = hashValue(safeToken).slice(0, 24);
+    enforceNamedRateLimit(name, tokenKey, policy);
+}
 
 function normalizeTranscriptForGate(text = '') {
     return String(text || '')
@@ -141,6 +187,7 @@ function clearRuntimeProviderSecrets() {
 async function resolveProviderSecrets(accessToken, options = {}) {
     const token = (accessToken || '').trim();
     const consume = Boolean(options.consume);
+    const internal = Boolean(options.internal);
     if (!token) {
         throw new Error('Access token is required');
     }
@@ -165,13 +212,24 @@ async function resolveProviderSecrets(accessToken, options = {}) {
     }
 
     const endpoint = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/${functionName}`;
+    const headers = {
+        Authorization: `Bearer ${token}`,
+        apikey: supabaseAnonKey,
+        'Content-Type': 'application/json',
+        'x-client-intent': 'desktop-runtime',
+    };
+
+    if (internal) {
+        const runtimeSecret = (process.env.HINTIO_INTERNAL_RUNTIME_SECRET || '').trim();
+        if (!runtimeSecret) {
+            throw new Error('HINTIO_INTERNAL_RUNTIME_SECRET is required for internal secret resolution');
+        }
+        headers['x-runtime-secret'] = runtimeSecret;
+    }
+
     const response = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-            Authorization: `Bearer ${token}`,
-            apikey: supabaseAnonKey,
-            'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({ accessToken: token, consume }),
     });
 
@@ -700,6 +758,139 @@ async function maybeHumanizeCodeResponse(transcription, draftResponse, provider)
     }
 
     return draftResponse;
+}
+
+function extractAzureRegion(endpoint = '') {
+    const match = String(endpoint).match(/[a-z0-9-]+\.(\w+)\.cognitiveservices\.azure\.com/i);
+    return match ? match[1] : null;
+}
+
+function extractJsonObject(text = '') {
+    const jsonMatch = String(text || '').match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    try {
+        return JSON.parse(jsonMatch[0]);
+    } catch {
+        return null;
+    }
+}
+
+async function transcribeCalibrationAudioSecure(accessToken, audioBase64, mimeType = 'audio/webm;codecs=opus', language = 'en-US') {
+    const resolved = await resolveProviderSecrets(accessToken, { consume: false, internal: true });
+    const secrets = resolved?.data || {};
+    const buffer = Buffer.from(String(audioBase64 || ''), 'base64');
+    if (!buffer.length) {
+        throw new Error('Calibration audio payload is empty');
+    }
+
+    const groqKey = (secrets.groqApiKey || '').trim();
+    if (groqKey) {
+        const blob = new Blob([buffer], { type: mimeType || 'audio/webm;codecs=opus' });
+        const formData = new FormData();
+        formData.append('file', blob, 'calibration.webm');
+        formData.append('model', 'whisper-large-v3-turbo');
+        formData.append('language', String(language || 'en-US').split('-')[0]);
+        formData.append('response_format', 'text');
+
+        const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${groqKey}` },
+            body: formData,
+        });
+
+        if (response.ok) {
+            return (await response.text()).trim();
+        }
+    }
+
+    const azureKey = (secrets.azureApiKey || '').trim();
+    const azureEndpoint = (secrets.azureEndpoint || '').trim();
+    const region = extractAzureRegion(azureEndpoint);
+    if (azureKey && region) {
+        const recognitionUrl = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${encodeURIComponent(language || 'en-US')}&format=simple`;
+        const response = await fetch(recognitionUrl, {
+            method: 'POST',
+            headers: {
+                'Ocp-Apim-Subscription-Key': azureKey,
+                'Content-Type': mimeType || 'audio/webm;codecs=opus',
+            },
+            body: buffer,
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            return String(data.DisplayText || data.NBest?.[0]?.Display || '').trim();
+        }
+    }
+
+    throw new Error('No secure transcription provider available for calibration');
+}
+
+async function analyzeCalibrationProfileSecure(accessToken, prompt) {
+    const resolved = await resolveProviderSecrets(accessToken, { consume: false, internal: true });
+    const secrets = resolved?.data || {};
+
+    const azureKey = (secrets.azureApiKey || '').trim();
+    const azureEndpoint = (secrets.azureEndpoint || '').trim();
+    const azureDeployment = (secrets.azureDeployment || '').trim();
+
+    if (azureKey && azureEndpoint && azureDeployment) {
+        let baseEndpoint = azureEndpoint.replace(/\/$/, '');
+        baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
+        const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=2025-04-01-preview`;
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'api-key': azureKey,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                messages: [
+                    { role: 'system', content: 'You are a speech pattern analyst. Respond only with valid JSON.' },
+                    { role: 'user', content: String(prompt || '') },
+                ],
+                temperature: 0.1,
+                max_completion_tokens: 2048,
+            }),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const content = data?.choices?.[0]?.message?.content || '';
+            const parsed = extractJsonObject(content);
+            if (parsed) return parsed;
+        }
+    }
+
+    const groqKey = (secrets.groqApiKey || '').trim();
+    if (groqKey) {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${groqKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                model: 'llama-3.3-70b-versatile',
+                messages: [
+                    { role: 'system', content: 'You are a speech pattern analyst. Respond only with valid JSON.' },
+                    { role: 'user', content: String(prompt || '') },
+                ],
+                temperature: 0.1,
+                max_tokens: 2048,
+            }),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const content = data?.choices?.[0]?.message?.content || '';
+            const parsed = extractJsonObject(content);
+            if (parsed) return parsed;
+        }
+    }
+
+    throw new Error('No secure analysis provider available for calibration');
 }
 
 async function sendToGroq(transcription) {
@@ -1651,6 +1842,12 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
     ipcMain.handle('resolve-provider-secrets', async (event, accessToken, options = {}) => {
         try {
+            ensureStringWithinLimit(accessToken, 256, 'Access token');
+            enforceIpcRateLimit(event, 'auth.resolve-provider-secrets', RATE_LIMIT_POLICIES.authResolve);
+            enforceTokenScopedLimit('auth.resolve-provider-secrets.token', accessToken, {
+                ...RATE_LIMIT_POLICIES.authResolve,
+                max: 5,
+            });
             const result = await resolveProviderSecrets(accessToken, options);
             return result;
         } catch (error) {
@@ -1667,52 +1864,70 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         }
     });
 
-    ipcMain.handle('initialize-cloud', async (event, token, profile, userContext) => {
+    ipcMain.handle('auth:calibration-transcribe', async (event, payload = {}) => {
         try {
-            currentProviderMode = 'cloud';
-            initializeNewSession(profile);
-            setOnTurnComplete((transcription, response) => {
-                saveConversationTurn(transcription, response);
-            });
-            sendToRenderer('session-initializing', true);
-            await connectCloud(token, profile, userContext);
-            sendToRenderer('session-initializing', false);
-            return true;
-        } catch (err) {
-            console.error('[Cloud] Init error:', err);
-            currentProviderMode = 'byok';
-            sendToRenderer('session-initializing', false);
-            return false;
+            const accessToken = String(payload.accessToken || '').trim();
+            const audioBase64 = ensureStringWithinLimit(payload.audioBase64 || '', 12 * 1024 * 1024, 'Calibration audio');
+            const mimeType = String(payload.mimeType || 'audio/webm;codecs=opus');
+            const language = String(payload.language || 'en-US');
+
+            if (!accessToken) {
+                return { success: false, error: 'Access token is required' };
+            }
+            if (!audioBase64) {
+                return { success: false, error: 'Calibration audio is required' };
+            }
+
+            enforceIpcRateLimit(event, 'auth.calibration-transcribe', RATE_LIMIT_POLICIES.calibrationTranscribe);
+            enforceTokenScopedLimit('auth.calibration-transcribe.token', accessToken, RATE_LIMIT_POLICIES.calibrationTranscribe);
+            const text = await transcribeCalibrationAudioSecure(accessToken, audioBase64, mimeType, language);
+            return { success: true, text };
+        } catch (error) {
+            console.error('Calibration transcription failed:', error);
+            return { success: false, error: error.message };
         }
     });
 
+    ipcMain.handle('auth:calibration-analyze', async (event, payload = {}) => {
+        try {
+            const accessToken = String(payload.accessToken || '').trim();
+            const prompt = ensureStringWithinLimit(payload.prompt || '', 12_000, 'Analysis prompt').trim();
+
+            if (!accessToken) {
+                return { success: false, error: 'Access token is required' };
+            }
+            if (!prompt) {
+                return { success: false, error: 'Analysis prompt is required' };
+            }
+
+            enforceIpcRateLimit(event, 'auth.calibration-analyze', RATE_LIMIT_POLICIES.calibrationAnalyze);
+            enforceTokenScopedLimit('auth.calibration-analyze.token', accessToken, RATE_LIMIT_POLICIES.calibrationAnalyze);
+            const profile = await analyzeCalibrationProfileSecure(accessToken, prompt);
+            return { success: true, profile };
+        } catch (error) {
+            console.error('Calibration profile analysis failed:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('initialize-cloud', async () => {
+        sendToRenderer('update-status', 'Access token mode only');
+        return false;
+    });
+
     ipcMain.handle('initialize-azure', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
-        currentProviderMode = 'byok';
+        currentProviderMode = 'token';
 
         try {
+            ensureStringWithinLimit(apiKey, 256, 'Access token');
+            ensureStringWithinLimit(customPrompt || '', 16_000, 'Custom prompt');
+            enforceIpcRateLimit(event, 'auth.initialize-azure', RATE_LIMIT_POLICIES.initializeAzure);
+            enforceTokenScopedLimit('auth.initialize-azure.token', apiKey, RATE_LIMIT_POLICIES.initializeAzure);
             await resolveProviderSecrets(apiKey, { consume: true });
         } catch (error) {
             console.error('[Init] Failed to resolve provider secrets:', error.message);
             sendToRenderer('update-status', 'Invalid access token or Supabase unavailable');
             return false;
-        }
-
-        if (hasManagedCloudToken()) {
-            try {
-                currentProviderMode = 'cloud';
-                initializeNewSession(profile);
-                setOnTurnComplete((transcription, response) => {
-                    saveConversationTurn(transcription, response);
-                });
-                sendToRenderer('session-initializing', true);
-                await connectCloud(runtimeProviderSecrets.cloudToken, profile, customPrompt || '');
-                sendToRenderer('session-initializing', false);
-                return true;
-            } catch (error) {
-                console.error('[Init] Managed cloud token failed, falling back to provider keys:', error);
-                currentProviderMode = 'byok';
-                sendToRenderer('session-initializing', false);
-            }
         }
 
         if (!hasAzureKey()) {
@@ -1750,36 +1965,12 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         return true;
     });
 
-    ipcMain.handle('initialize-local', async (event, ollamaHost, ollamaModel, whisperModel, profile, customPrompt) => {
-        currentProviderMode = 'local';
-        const success = await getLocalAi().initializeLocalSession(ollamaHost, ollamaModel, whisperModel, profile, customPrompt);
-        if (!success) {
-            currentProviderMode = 'byok';
-        }
-        return success;
+    ipcMain.handle('initialize-local', async () => {
+        sendToRenderer('update-status', 'Access token mode only');
+        return false;
     });
 
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
-        if (currentProviderMode === 'cloud') {
-            try {
-                const pcmBuffer = Buffer.from(data, 'base64');
-                sendCloudAudio(pcmBuffer);
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending cloud audio:', error);
-                return { success: false, error: error.message };
-            }
-        }
-        if (currentProviderMode === 'local') {
-            try {
-                const pcmBuffer = Buffer.from(data, 'base64');
-                getLocalAi().processLocalAudio(pcmBuffer);
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending local audio:', error);
-                return { success: false, error: error.message };
-            }
-        }
         // Azure STT path — push audio to speech-to-text buffer
         if (speechStt.isSpeechSTTActive()) {
             speechStt.pushAudio(data);
@@ -1790,26 +1981,6 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
     // Handle microphone audio on a separate channel
     ipcMain.handle('send-mic-audio-content', async (event, { data, mimeType }) => {
-        if (currentProviderMode === 'cloud') {
-            try {
-                const pcmBuffer = Buffer.from(data, 'base64');
-                sendCloudAudio(pcmBuffer);
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending cloud mic audio:', error);
-                return { success: false, error: error.message };
-            }
-        }
-        if (currentProviderMode === 'local') {
-            try {
-                const pcmBuffer = Buffer.from(data, 'base64');
-                getLocalAi().processLocalAudio(pcmBuffer);
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending local mic audio:', error);
-                return { success: false, error: error.message };
-            }
-        }
         // Azure STT path — mic audio also goes to speech-to-text buffer
         if (speechStt.isSpeechSTTActive()) {
             speechStt.pushAudio(data);
@@ -1820,6 +1991,7 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
     ipcMain.handle('send-image-content', async (event, { data, prompt }) => {
         try {
+            enforceIpcRateLimit(event, 'session.send-image-content', RATE_LIMIT_POLICIES.sendImage);
             if (!data || typeof data !== 'string') {
                 console.error('Invalid image data received');
                 return { success: false, error: 'Invalid image data' };
@@ -1834,19 +2006,6 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
             process.stdout.write('!');
 
-            if (currentProviderMode === 'cloud') {
-                const sent = sendCloudImage(data);
-                if (!sent) {
-                    return { success: false, error: 'Cloud connection not active' };
-                }
-                return { success: true, model: 'cloud' };
-            }
-
-            if (currentProviderMode === 'local') {
-                const result = await getLocalAi().sendLocalImage(data, prompt);
-                return result;
-            }
-
             if (!hasAzureKey()) {
                 return { success: false, error: 'Azure OpenAI credentials are not configured' };
             }
@@ -1860,6 +2019,7 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
     });
 
     ipcMain.handle('send-text-message', async (event, text, profile = null) => {
+        enforceIpcRateLimit(event, 'session.send-text-message', RATE_LIMIT_POLICIES.sendText);
         if (!text || typeof text !== 'string' || text.trim().length === 0) {
             return { success: false, error: 'Invalid text message' };
         }
@@ -1883,32 +2043,9 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
             currentSystemPrompt = getSystemPrompt(resolvedProfile, currentCustomPrompt || '', googleSearchEnabled, currentVoiceProfile);
         }
 
-        if (currentProviderMode === 'cloud') {
-            try {
-                console.log('Sending text to cloud:', text);
-                sendCloudText(text.trim());
-                return { success: true };
-            } catch (error) {
-                console.error('Error sending cloud text:', error);
-                return { success: false, error: error.message };
-            }
-        }
-
-        if (currentProviderMode === 'local') {
-            try {
-                console.log('Sending text to local Ollama:', text, '| profile:', resolvedProfile);
-                // Pass the resolved system prompt so Ollama uses the correct profile
-                // even if the session was initialized with a different one.
-                return await getLocalAi().sendLocalText(text.trim(), currentSystemPrompt);
-            } catch (error) {
-                console.error('Error sending local text:', error);
-                return { success: false, error: error.message };
-            }
-        }
-
-        // --- BYOK mode (Azure only) ---
+        // Access-token mode (Azure only)
         try {
-            console.log('Sending text message via BYOK:', text, '| profile:', resolvedProfile);
+            console.log('Sending text message via access token mode:', text, '| profile:', resolvedProfile);
 
             if (hasAzureKey()) {
                 sendToAzure(text.trim());
@@ -1956,13 +2093,13 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
             if (currentProviderMode === 'cloud') {
                 closeCloud();
-                currentProviderMode = 'byok';
+                currentProviderMode = 'token';
                 return { success: true };
             }
 
             if (currentProviderMode === 'local') {
                 getLocalAi().closeLocalSession();
-                currentProviderMode = 'byok';
+                currentProviderMode = 'token';
                 return { success: true };
             }
 

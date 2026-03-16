@@ -2,6 +2,7 @@ import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
 import { unifiedPageStyles } from './sharedPageStyles.js';
 
 export class FeedbackView extends LitElement {
+    static FEEDBACK_COOLDOWN_MS = 60 * 1000;
     static styles = [
         unifiedPageStyles,
         css`
@@ -268,8 +269,41 @@ export class FeedbackView extends LitElement {
     }
 
     async _submitFeedback() {
-        const text = this._feedbackText.trim();
+        const text = String(this._feedbackText || '')
+            .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+            .trim();
         if (!text || this._feedbackSending) return;
+
+        const now = Date.now();
+        const lastFeedbackAt = Number(localStorage.getItem('hintio-feedback-last-submit-at') || '0');
+        const waitMs = FeedbackView.FEEDBACK_COOLDOWN_MS - (now - lastFeedbackAt);
+        if (waitMs > 0) {
+            const waitSeconds = Math.ceil(waitMs / 1000);
+            this._feedbackStatus = `error:Please wait ${waitSeconds}s before sending again`;
+            this.requestUpdate();
+            return;
+        }
+
+        const suspiciousPatterns = [
+            /https?:\/\//gi,
+            /<script/gi,
+            /buy\s+now/gi,
+            /free\s+money/gi,
+            /telegram/gi,
+        ];
+        const suspiciousHitCount = suspiciousPatterns.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0);
+        if (suspiciousHitCount >= 2) {
+            this._feedbackStatus = 'error:Feedback looks automated and was blocked';
+            this.requestUpdate();
+            return;
+        }
+
+        const email = String(this._feedbackEmail || '').trim();
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+            this._feedbackStatus = 'error:Invalid email format';
+            this.requestUpdate();
+            return;
+        }
 
         let content = text;
         if (this._selectedCategory) content = `[${this._selectedCategory}] ${content}`;
@@ -290,8 +324,8 @@ export class FeedbackView extends LitElement {
 
         try {
             const body = { feedback: content };
-            if (this._feedbackEmail.trim()) {
-                body.email = this._feedbackEmail.trim();
+            if (email) {
+                body.email = email;
             }
 
             const res = await fetch('https://api.hintio.com/api/feedback', {
@@ -305,6 +339,7 @@ export class FeedbackView extends LitElement {
                 this._feedbackEmail = '';
                 this._rating = 0;
                 this._selectedCategory = '';
+                localStorage.setItem('hintio-feedback-last-submit-at', String(Date.now()));
                 this._feedbackStatus = 'success:Feedback sent — thank you!';
             } else if (res.status === 429) {
                 this._feedbackStatus = 'error:Please wait a few minutes before sending again';

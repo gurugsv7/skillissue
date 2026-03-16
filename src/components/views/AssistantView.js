@@ -547,6 +547,7 @@ export class AssistantView extends LitElement {
                     sanitize: false,
                 });
                 let rendered = window.marked.parse(content);
+                rendered = this.sanitizeRenderedHtml(rendered);
                 rendered = this.wrapWordsInSpans(rendered);
                 return rendered;
             } catch (error) {
@@ -555,6 +556,73 @@ export class AssistantView extends LitElement {
             }
         }
         return content;
+    }
+
+    sanitizeRenderedHtml(rawHtml) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(String(rawHtml || ''), 'text/html');
+        const allowedTags = new Set([
+            'P', 'BR', 'STRONG', 'B', 'EM', 'I', 'CODE', 'PRE',
+            'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+            'BLOCKQUOTE', 'HR', 'A', 'TABLE', 'THEAD', 'TBODY',
+            'TR', 'TH', 'TD', 'SPAN', 'DIV',
+        ]);
+
+        const removeNodeButKeepChildren = (node) => {
+            const parent = node.parentNode;
+            if (!parent) return;
+            while (node.firstChild) {
+                parent.insertBefore(node.firstChild, node);
+            }
+            parent.removeChild(node);
+        };
+
+        const sanitizeNode = (node) => {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                const tag = node.tagName;
+
+                if (!allowedTags.has(tag)) {
+                    removeNodeButKeepChildren(node);
+                    return;
+                }
+
+                for (const attr of Array.from(node.attributes)) {
+                    const name = attr.name.toLowerCase();
+                    const value = String(attr.value || '').trim();
+
+                    if (name.startsWith('on')) {
+                        node.removeAttribute(attr.name);
+                        continue;
+                    }
+
+                    if (name === 'style') {
+                        node.removeAttribute(attr.name);
+                        continue;
+                    }
+
+                    if (tag === 'A' && name === 'href') {
+                        const safeHref = value.toLowerCase();
+                        const allowedHref = safeHref.startsWith('https://') || safeHref.startsWith('http://') || safeHref.startsWith('mailto:');
+                        if (!allowedHref || safeHref.includes('javascript:') || safeHref.includes('data:')) {
+                            node.removeAttribute('href');
+                        } else {
+                            node.setAttribute('rel', 'noopener noreferrer');
+                            node.setAttribute('target', '_blank');
+                        }
+                        continue;
+                    }
+
+                    if (name !== 'href' && name !== 'class' && name !== 'data-word' && name !== 'rel' && name !== 'target') {
+                        node.removeAttribute(attr.name);
+                    }
+                }
+            }
+
+            Array.from(node.childNodes).forEach(child => sanitizeNode(child));
+        };
+
+        Array.from(doc.body.childNodes).forEach(node => sanitizeNode(node));
+        return doc.body.innerHTML;
     }
 
     wrapWordsInSpans(html) {

@@ -4,7 +4,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, apikey, content-type',
+    'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-runtime-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -28,6 +28,23 @@ type RequestPayload = {
     consume?: boolean;
 };
 
+const ACCESS_TOKEN_REGEX = /^SKI-[A-Za-z0-9_-]{20,252}$/;
+
+function getClientIp(req: Request): string {
+    const forwarded = req.headers.get('x-forwarded-for') ?? '';
+    const first = forwarded.split(',')[0]?.trim();
+    if (first) return first;
+    return req.headers.get('x-real-ip')?.trim() || 'unknown';
+}
+
+async function sha256Hex(value: string): Promise<string> {
+    const encoded = new TextEncoder().encode(value);
+    const digestBuffer = await crypto.subtle.digest('SHA-256', encoded);
+    return Array.from(new Uint8Array(digestBuffer))
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+}
+
 Deno.serve(async (req: Request) => {
     if (req.method === 'OPTIONS') {
         return new Response('ok', { headers: corsHeaders });
@@ -43,6 +60,7 @@ Deno.serve(async (req: Request) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     const expectedAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+    const expectedRuntimeSecret = Deno.env.get('HINTIO_INTERNAL_RUNTIME_SECRET') ?? '';
 
     if (!supabaseUrl || !serviceRoleKey) {
         return new Response(JSON.stringify({ error: 'Supabase service runtime missing env vars' }), {
@@ -59,16 +77,67 @@ Deno.serve(async (req: Request) => {
         });
     }
 
+    const runtimeSecretHeader = (req.headers.get('x-runtime-secret') ?? '').trim();
+    if (runtimeSecretHeader && (!expectedRuntimeSecret || runtimeSecretHeader !== expectedRuntimeSecret)) {
+        return new Response(JSON.stringify({ error: 'Unauthorized internal runtime request' }), {
+            status: 401,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
+    const isInternalRuntimeRequest =
+        Boolean(expectedRuntimeSecret) &&
+        Boolean(runtimeSecretHeader) &&
+        runtimeSecretHeader === expectedRuntimeSecret;
+
+    const clientIntent = (req.headers.get('x-client-intent') ?? '').trim().toLowerCase();
+    if (!isInternalRuntimeRequest && clientIntent !== 'desktop-runtime') {
+        return new Response(JSON.stringify({ error: 'Invalid client intent' }), {
+            status: 403,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
+    const userAgent = (req.headers.get('user-agent') ?? '').toLowerCase();
+    const suspiciousAgent =
+        !userAgent ||
+        userAgent.includes('python-requests') ||
+        userAgent.includes('curl/') ||
+        userAgent.includes('wget/') ||
+        userAgent.includes('scrapy') ||
+        userAgent.includes('postmanruntime');
+
+    if (!isInternalRuntimeRequest && suspiciousAgent) {
+        return new Response(JSON.stringify({ error: 'Automated client rejected' }), {
+            status: 403,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
     const authHeader = req.headers.get('authorization') ?? '';
     const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()
         : '';
 
+    const contentType = (req.headers.get('content-type') ?? '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+        return new Response(JSON.stringify({ error: 'Content-Type must be application/json' }), {
+            status: 415,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
     let payload: RequestPayload = {};
     let consume = false;
     try {
         payload = (await req.json().catch(() => ({}))) as RequestPayload;
-        consume = Boolean(payload.consume);
+        if (payload.consume !== undefined && typeof payload.consume !== 'boolean') {
+            return new Response(JSON.stringify({ error: 'consume must be a boolean' }), {
+                status: 400,
+                headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+        }
+        consume = payload.consume === true;
     } catch {
         payload = {};
         consume = false;
@@ -82,8 +151,15 @@ Deno.serve(async (req: Request) => {
         });
     }
 
-    if (!accessToken.startsWith('SKI-')) {
+    if (!ACCESS_TOKEN_REGEX.test(accessToken)) {
         return new Response(JSON.stringify({ error: 'Invalid access token format' }), {
+            status: 401,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
+    if (payload.accessToken && payload.accessToken.trim() && payload.accessToken.trim() !== accessToken) {
+        return new Response(JSON.stringify({ error: 'Access token mismatch between body and authorization header' }), {
             status: 401,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -92,6 +168,50 @@ Deno.serve(async (req: Request) => {
     const client = createClient(supabaseUrl, serviceRoleKey, {
         auth: { persistSession: false, autoRefreshToken: false },
     });
+
+    const clientIp = getClientIp(req);
+    const tokenHash = await sha256Hex(accessToken);
+    const rateLimitIdentifier = `${clientIp}:${tokenHash}`;
+    const { data: rateLimitAllowed, error: rateLimitError } = await client.rpc('enforce_access_token_rate_limit', {
+        p_identifier: rateLimitIdentifier,
+        p_max_attempts: 12,
+        p_window_seconds: 300,
+    });
+
+    if (rateLimitError) {
+        return new Response(JSON.stringify({ error: 'Auth rate limiter unavailable' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
+    if (!rateLimitAllowed) {
+        return new Response(JSON.stringify({ error: 'Too many authentication attempts. Please wait and try again.' }), {
+            status: 429,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
+    const burstIdentifier = `burst:${clientIp}`;
+    const { data: burstAllowed, error: burstRateLimitError } = await client.rpc('enforce_access_token_rate_limit', {
+        p_identifier: burstIdentifier,
+        p_max_attempts: 45,
+        p_window_seconds: 60,
+    });
+
+    if (burstRateLimitError) {
+        return new Response(JSON.stringify({ error: 'Burst rate limiter unavailable' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
+
+    if (!burstAllowed) {
+        return new Response(JSON.stringify({ error: 'Too many requests. Please slow down.' }), {
+            status: 429,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+    }
 
     const rpcName = consume ? 'consume_interview_credit' : 'resolve_provider_secrets';
     const { data, error } = await client.rpc(rpcName, {
@@ -113,7 +233,7 @@ Deno.serve(async (req: Request) => {
         });
     }
 
-    const includeSecrets = consume;
+    const includeSecrets = consume || isInternalRuntimeRequest;
 
     return new Response(
         JSON.stringify({

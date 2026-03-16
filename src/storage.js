@@ -1,6 +1,17 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const {
+    isPlainObject,
+    ensurePlainObject,
+    sanitizeText,
+    ensureBoolean,
+    ensureNumber,
+    ensureIntegerString,
+    ensureLanguageCode,
+    ensureSafeUrl,
+    ensureProfile,
+} = require('./utils/inputValidation');
 
 const CONFIG_VERSION = 1;
 
@@ -24,6 +35,8 @@ const DEFAULT_CREDENTIALS = {
 
 const DEFAULT_PREFERENCES = {
     customPrompt: '',
+    resumeText: '',
+    resumeFileName: '',
     selectedProfile: 'interview',
     selectedLanguage: 'en-US',
     selectedScreenshotInterval: '5',
@@ -169,6 +182,153 @@ function initializeStorage() {
     }
 }
 
+const CONFIG_KEYS = {
+    onboarded: value => ensureBoolean(value, 'config.onboarded'),
+    layout: value => {
+        const normalized = sanitizeText(value, { fieldName: 'config.layout', maxLength: 20, multiline: false });
+        if (!['normal', 'minimal', 'compact'].includes(normalized)) {
+            throw new Error('config.layout must be one of: normal, minimal, compact');
+        }
+        return normalized;
+    },
+};
+
+function sanitizeConfigPatch(configPatch) {
+    ensurePlainObject(configPatch, 'config');
+    const sanitized = {};
+    for (const [key, value] of Object.entries(configPatch)) {
+        if (key === 'configVersion') continue;
+        const validator = CONFIG_KEYS[key];
+        if (!validator) {
+            throw new Error(`Unknown config key: ${key}`);
+        }
+        sanitized[key] = validator(value);
+    }
+    return sanitized;
+}
+
+function sanitizeCredentialsPatch(credentialsPatch) {
+    ensurePlainObject(credentialsPatch, 'credentials');
+    const sanitized = {};
+    const tokenRegex = /^SKI-[A-Za-z0-9_-]{20,252}$/;
+
+    for (const [key, value] of Object.entries(credentialsPatch)) {
+        if (!Object.prototype.hasOwnProperty.call(DEFAULT_CREDENTIALS, key)) {
+            throw new Error(`Unknown credentials key: ${key}`);
+        }
+
+        if (value === null || value === undefined) {
+            sanitized[key] = '';
+            continue;
+        }
+
+        if (key === 'azureEndpoint' || key === 'supabaseUrl') {
+            const textValue = sanitizeText(String(value), { fieldName: `credentials.${key}`, maxLength: 1024, multiline: false });
+            sanitized[key] = textValue ? ensureSafeUrl(textValue, { fieldName: `credentials.${key}`, protocols: ['https:'] }) : '';
+            continue;
+        }
+
+        if (key === 'cloudToken') {
+            const tokenValue = sanitizeText(String(value), { fieldName: 'credentials.cloudToken', maxLength: 256, multiline: false });
+            if (tokenValue && !tokenRegex.test(tokenValue)) {
+                throw new Error('credentials.cloudToken has invalid format');
+            }
+            sanitized[key] = tokenValue;
+            continue;
+        }
+
+        sanitized[key] = sanitizeText(String(value), {
+            fieldName: `credentials.${key}`,
+            maxLength: key === 'supabaseAnonKey' ? 4096 : 2048,
+            multiline: false,
+        });
+    }
+
+    return sanitized;
+}
+
+const PREFERENCE_KEYS = {
+    customPrompt: value => sanitizeText(String(value), { fieldName: 'preferences.customPrompt', maxLength: 25000 }),
+    resumeText: value => sanitizeText(String(value), { fieldName: 'preferences.resumeText', maxLength: 250000 }),
+    resumeFileName: value => sanitizeText(String(value), { fieldName: 'preferences.resumeFileName', maxLength: 200, multiline: false }),
+    selectedProfile: value => ensureProfile(String(value), 'preferences.selectedProfile'),
+    selectedLanguage: value => ensureLanguageCode(String(value), 'preferences.selectedLanguage'),
+    selectedScreenshotInterval: value => ensureIntegerString(value, { fieldName: 'preferences.selectedScreenshotInterval', min: 1, max: 60 }),
+    selectedImageQuality: value => {
+        const quality = sanitizeText(String(value), { fieldName: 'preferences.selectedImageQuality', maxLength: 16, multiline: false });
+        if (!['high', 'medium', 'low'].includes(quality)) {
+            throw new Error('preferences.selectedImageQuality must be high, medium, or low');
+        }
+        return quality;
+    },
+    advancedMode: value => ensureBoolean(value, 'preferences.advancedMode'),
+    audioMode: value => {
+        const mode = sanitizeText(String(value), { fieldName: 'preferences.audioMode', maxLength: 20, multiline: false });
+        if (!['speaker_only', 'mic_only', 'both', 'none'].includes(mode)) {
+            throw new Error('preferences.audioMode must be speaker_only, mic_only, both, or none');
+        }
+        return mode;
+    },
+    fontSize: value => {
+        if (typeof value === 'number') {
+            return ensureNumber(value, { fieldName: 'preferences.fontSize', min: 12, max: 36 });
+        }
+        const size = sanitizeText(String(value), { fieldName: 'preferences.fontSize', maxLength: 12, multiline: false });
+        if (!['small', 'medium', 'large'].includes(size)) {
+            throw new Error('preferences.fontSize must be a number (12-36) or one of: small, medium, large');
+        }
+        return size;
+    },
+    backgroundTransparency: value => ensureNumber(value, { fieldName: 'preferences.backgroundTransparency', min: 0, max: 1 }),
+    googleSearchEnabled: value => ensureBoolean(value, 'preferences.googleSearchEnabled'),
+    ollamaHost: value => ensureSafeUrl(String(value), {
+        fieldName: 'preferences.ollamaHost',
+        protocols: ['http:', 'https:'],
+        allowLocalhost: true,
+        maxLength: 512,
+    }),
+    ollamaModel: value => sanitizeText(String(value), { fieldName: 'preferences.ollamaModel', maxLength: 200, multiline: false }),
+    whisperModel: value => sanitizeText(String(value), { fieldName: 'preferences.whisperModel', maxLength: 200, multiline: false }),
+    skipVoiceCalibration: value => ensureBoolean(value, 'preferences.skipVoiceCalibration'),
+};
+
+function sanitizePreferencesPatch(preferencesPatch) {
+    ensurePlainObject(preferencesPatch, 'preferences');
+    const sanitized = {};
+    for (const [key, value] of Object.entries(preferencesPatch)) {
+        const validator = PREFERENCE_KEYS[key];
+        if (!validator) {
+            throw new Error(`Unknown preferences key: ${key}`);
+        }
+        sanitized[key] = validator(value);
+    }
+    return sanitized;
+}
+
+function sanitizeKeybinds(keybinds) {
+    if (keybinds === null) return null;
+    ensurePlainObject(keybinds, 'keybinds');
+    const sanitized = {};
+    const acceleratorRegex = /^[A-Za-z0-9+\-\s]{1,80}$/;
+    for (const [action, combo] of Object.entries(keybinds)) {
+        const safeAction = sanitizeText(action, { fieldName: 'keybind action', maxLength: 60, multiline: false });
+        const safeCombo = sanitizeText(String(combo), { fieldName: `keybinds.${safeAction}`, maxLength: 80, multiline: false });
+        if (!acceleratorRegex.test(safeCombo)) {
+            throw new Error(`Invalid keybind format for action: ${safeAction}`);
+        }
+        sanitized[safeAction] = safeCombo;
+    }
+    return sanitized;
+}
+
+function sanitizeSessionId(sessionId) {
+    const value = sanitizeText(String(sessionId), { fieldName: 'sessionId', maxLength: 32, multiline: false, allowEmpty: false });
+    if (!/^\d{10,20}$/.test(value)) {
+        throw new Error('sessionId must be a numeric timestamp-like string');
+    }
+    return value;
+}
+
 // ============ CONFIG ============
 
 function getConfig() {
@@ -176,14 +336,20 @@ function getConfig() {
 }
 
 function setConfig(config) {
+    const safePatch = sanitizeConfigPatch(config);
     const current = getConfig();
-    const updated = { ...current, ...config, configVersion: CONFIG_VERSION };
+    const updated = { ...current, ...safePatch, configVersion: CONFIG_VERSION };
     return writeJsonFile(getConfigPath(), updated);
 }
 
 function updateConfig(key, value) {
+    const safeKey = sanitizeText(String(key), { fieldName: 'config key', maxLength: 80, multiline: false, allowEmpty: false });
+    const validator = CONFIG_KEYS[safeKey];
+    if (!validator) {
+        throw new Error(`Unknown config key: ${safeKey}`);
+    }
     const config = getConfig();
-    config[key] = value;
+    config[safeKey] = validator(value);
     return writeJsonFile(getConfigPath(), config);
 }
 
@@ -194,8 +360,9 @@ function getCredentials() {
 }
 
 function setCredentials(credentials) {
+    const safePatch = sanitizeCredentialsPatch(credentials);
     const current = getCredentials();
-    const updated = { ...current, ...credentials };
+    const updated = { ...current, ...safePatch };
     return writeJsonFile(getCredentialsPath(), updated);
 }
 
@@ -257,14 +424,20 @@ function getPreferences() {
 }
 
 function setPreferences(preferences) {
+    const safePatch = sanitizePreferencesPatch(preferences);
     const current = getPreferences();
-    const updated = { ...current, ...preferences };
+    const updated = { ...current, ...safePatch };
     return writeJsonFile(getPreferencesPath(), updated);
 }
 
 function updatePreference(key, value) {
+    const safeKey = sanitizeText(String(key), { fieldName: 'preferences key', maxLength: 100, multiline: false, allowEmpty: false });
+    const validator = PREFERENCE_KEYS[safeKey];
+    if (!validator) {
+        throw new Error(`Unknown preferences key: ${safeKey}`);
+    }
     const preferences = getPreferences();
-    preferences[key] = value;
+    preferences[safeKey] = validator(value);
     return writeJsonFile(getPreferencesPath(), preferences);
 }
 
@@ -275,7 +448,7 @@ function getKeybinds() {
 }
 
 function setKeybinds(keybinds) {
-    return writeJsonFile(getKeybindsPath(), keybinds);
+    return writeJsonFile(getKeybindsPath(), sanitizeKeybinds(keybinds));
 }
 
 // ============ LIMITS (Rate Limiting) ============
@@ -426,10 +599,13 @@ function getModelForToday() {
 // ============ HISTORY ============
 
 function getSessionPath(sessionId) {
-    return path.join(getHistoryDir(), `${sessionId}.json`);
+    return path.join(getHistoryDir(), `${sanitizeSessionId(sessionId)}.json`);
 }
 
 function saveSession(sessionId, data) {
+    if (!isPlainObject(data)) {
+        throw new Error('session data must be an object');
+    }
     const sessionPath = getSessionPath(sessionId);
 
     // Load existing session to preserve metadata

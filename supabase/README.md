@@ -23,6 +23,7 @@ Set environment variables before running/packaging the app:
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_SECRETS_FUNCTION` (optional, defaults to `resolve-provider-secrets`)
+- `HINTIO_INTERNAL_RUNTIME_SECRET` (required for secure internal-only secret resolution)
 
 ## 4) Create access token records
 
@@ -45,3 +46,19 @@ Insert matching secret row in `public.provider_secrets`.
 - Edge function now requires `Authorization: Bearer <SKI-...>` and validates `apikey` header against `SUPABASE_ANON_KEY` when configured.
 - Tables and RPC execution are hardened to `service_role` only via RLS policies and grants.
 - Optional `pg_cron` job cleans up expired tokens every 6 hours when extension is available.
+
+## Auth hardening checklist (Supabase Auth settings)
+
+This app uses access-token auth for provider secret resolution. If you also enable Supabase user auth on **free tier**, prefer low-email-volume options:
+
+- **Prefer Google OAuth sign-in**: Auth → Providers → Google. This avoids most email-sending quota usage.
+- **Email verification optional on free tier**: if you keep Email/Password enabled, you may disable "Confirm email" to avoid quota pressure.
+- **Session expiration**: Auth → Sessions → set JWT/session lifetime (for example 1–8 hours) and require refresh.
+- **Password reset token expiry**: Auth → Email Templates / Security → set short recovery-link/token expiry.
+- **Brute-force protection**: keep built-in bot/abuse protections and rate limits for sign-in and recovery endpoints.
+
+App-level additions in this repo:
+
+- DB migration `20260316_auth_rate_limit_and_expiry_hardening.sql` adds server-side token-attempt rate limiting.
+- Access tokens are now required to have bounded expiry (`expires_at` mandatory, max 30-day window).
+- Calibration transcription/analysis now runs via secure main-process IPC and never exposes provider secrets in renderer code.
