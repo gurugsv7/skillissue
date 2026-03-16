@@ -49,13 +49,33 @@ let runtimeSecretsToken = '';
 let runtimeSecretsResolvedAt = 0;
 let lastAcceptedTranscriptNormalized = '';
 let lastAcceptedTranscriptAt = 0;
-let lastAzureResponseCompletedAt = 0;
 let isAzureResponseInFlight = false;
+let pendingInterviewerTranscript = '';
 
 const PROVIDER_SECRETS_CACHE_TTL_MS = 30 * 60 * 1000;
 const MIN_TURN_WORDS = 4;
-const MIN_INTERVIEWER_TURN_GAP_MS = 7000;
 const DUPLICATE_TRANSCRIPT_WINDOW_MS = 25000;
+const MIN_MEANINGFUL_WORDS = 2;
+const FILLER_WORDS = new Set([
+    'um',
+    'uh',
+    'hmm',
+    'huh',
+    'mm',
+    'mmm',
+    'ah',
+    'oh',
+    'er',
+    'erm',
+    'hmmm',
+    'yeah',
+    'yep',
+    'nope',
+    'okay',
+    'ok',
+    'right',
+    'hmmmmm',
+]);
 const RATE_LIMIT_POLICIES = {
     authResolve: {
         windowMs: 10 * 60 * 1000,
@@ -110,35 +130,59 @@ function normalizeTranscriptForGate(text = '') {
         .trim();
 }
 
-function isQuestionLikeTurn(normalizedText = '') {
+function getGateWordStats(normalizedText = '') {
+    const words = String(normalizedText || '').split(' ').filter(Boolean);
+    const contentWords = words.filter((word) => /[a-z]/.test(word));
+    const meaningfulWords = contentWords.filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
+    const likelyNoiseTokens = meaningfulWords.filter((word) => word.length >= 5 && !/[aeiou]/.test(word));
+
+    return {
+        words,
+        contentWords,
+        meaningfulWords,
+        likelyNoiseTokens,
+    };
+}
+
+function isQuestionLikeTurn(normalizedText = '', stats = null) {
     if (!normalizedText) return false;
+
+    const turnStats = stats || getGateWordStats(normalizedText);
+    const wordCount = turnStats.words.length;
+    const meaningfulCount = turnStats.meaningfulWords.length;
+    const mostlyNoise = turnStats.meaningfulWords.length > 0 && (turnStats.likelyNoiseTokens.length / turnStats.meaningfulWords.length) >= 0.6;
+    if (mostlyNoise) return false;
+
+    if (wordCount < MIN_TURN_WORDS) return false;
+    if (meaningfulCount < MIN_MEANINGFUL_WORDS) return false;
 
     const hasQuestionMark = normalizedText.includes('?');
     const startsWithQuestionCue = /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|was|were)\b/.test(normalizedText);
     const startsWithPromptCue = /^(tell me|walk me through|explain|describe|compare|implement|write|build|design|solve|give me|can you|could you|would you)\b/.test(normalizedText);
+    const hasActionCue = /\b(explain|describe|compare|implement|write|build|design|solve|difference|between|approach|complexity|why|how|what|which)\b/.test(normalizedText);
 
-    return hasQuestionMark || startsWithQuestionCue || startsWithPromptCue;
+    if (hasQuestionMark && hasActionCue) return true;
+    return startsWithQuestionCue || startsWithPromptCue;
 }
 
 function shouldDispatchInterviewerTurn(transcription = '') {
     const normalized = normalizeTranscriptForGate(transcription);
     if (!normalized) return { accept: false, reason: 'empty', normalized };
 
-    const words = normalized.split(' ').filter(Boolean);
-    if (words.length < MIN_TURN_WORDS) {
+    const stats = getGateWordStats(normalized);
+    if (stats.words.length < MIN_TURN_WORDS) {
         return { accept: false, reason: 'too-short', normalized };
     }
 
-    if (!isQuestionLikeTurn(normalized)) {
+    if (stats.meaningfulWords.length < MIN_MEANINGFUL_WORDS) {
+        return { accept: false, reason: 'low-signal', normalized };
+    }
+
+    if (!isQuestionLikeTurn(normalized, stats)) {
         return { accept: false, reason: 'not-question-like', normalized };
     }
 
     const now = Date.now();
-    const recentlyAnswered = lastAzureResponseCompletedAt > 0 && (now - lastAzureResponseCompletedAt) < MIN_INTERVIEWER_TURN_GAP_MS;
-    if (recentlyAnswered) {
-        return { accept: false, reason: 'cooldown', normalized };
-    }
-
     const isDuplicate =
         lastAcceptedTranscriptNormalized
         && normalized === lastAcceptedTranscriptNormalized
@@ -313,6 +357,7 @@ function initializeNewSession(profile = null, customPrompt = null) {
     conversationHistory = [];
     screenAnalysisHistory = [];
     groqConversationHistory = [];
+    pendingInterviewerTranscript = '';
     currentProfile = profile;
     currentCustomPrompt = customPrompt;
     console.log('New conversation session started:', currentSessionId, 'profile:', profile);
@@ -1168,13 +1213,19 @@ async function sendToAzure(transcription) {
         }
 
         console.log(`Azure OpenAI response completed (${azureDeployment})`);
-        lastAzureResponseCompletedAt = Date.now();
         sendToRenderer('update-status', 'Listening...');
     } catch (error) {
         console.error('Error calling Azure OpenAI API:', error);
         sendToRenderer('update-status', 'Azure error: ' + error.message);
     } finally {
         isAzureResponseInFlight = false;
+        if (pendingInterviewerTranscript) {
+            const queuedTranscript = pendingInterviewerTranscript;
+            pendingInterviewerTranscript = '';
+            console.log('[TurnGate] Processing queued interviewer transcript');
+            sendToRenderer('update-status', 'Processing...');
+            sendToAzure(queuedTranscript);
+        }
     }
 }
 
@@ -1955,6 +2006,14 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
                 sendToRenderer('update-status', 'Listening...');
                 return;
             }
+
+            if (isAzureResponseInFlight) {
+                pendingInterviewerTranscript = String(transcription || '').trim();
+                console.log('[TurnGate] Queued interviewer transcript while response is in-flight');
+                sendToRenderer('update-status', 'Listening...');
+                return;
+            }
+
             sendToRenderer('update-status', 'Processing...');
             sendToAzure(transcription);
         });

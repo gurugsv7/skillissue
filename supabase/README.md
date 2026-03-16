@@ -8,12 +8,17 @@ Run `supabase/migrations/20260314_access_token_provider_secrets.sql` on your pro
 Run `supabase/migrations/20260314_token_quota_and_consume.sql` on your project.
 Run `supabase/migrations/20260315_harden_access_token_security.sql` on your project.
 Run `supabase/migrations/20260316_subscriptions_rls.sql` on your project.
+Run `supabase/migrations/20260316_issue_download_access_token.sql` on your project.
 
 ## 2) Deploy edge function
 
 Deploy `supabase/functions/resolve-provider-secrets/index.ts` as function slug:
 
 `resolve-provider-secrets`
+
+Deploy `supabase/functions/issue-download-key/index.ts` as function slug:
+
+`issue-download-key`
 
 ## 3) Configure Electron runtime
 
@@ -23,7 +28,18 @@ Set environment variables before running/packaging the app:
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_SECRETS_FUNCTION` (optional, defaults to `resolve-provider-secrets`)
+- `SUPABASE_ISSUE_DOWNLOAD_KEY_FUNCTION` (optional, defaults to `issue-download-key`)
 - `HINTIO_INTERNAL_RUNTIME_SECRET` (required for secure internal-only secret resolution)
+- `HINTIO_FREE_DOWNLOAD_URL` (optional, defaults to latest releases page)
+
+Optional managed-provider env vars for `issue-download-key` (if not set, function falls back to latest `provider_secrets` row):
+
+- `HINTIO_MANAGED_GEMINI_API_KEY`
+- `HINTIO_MANAGED_GROQ_API_KEY`
+- `HINTIO_MANAGED_AZURE_API_KEY`
+- `HINTIO_MANAGED_AZURE_ENDPOINT`
+- `HINTIO_MANAGED_AZURE_DEPLOYMENT`
+- `HINTIO_MANAGED_CLOUD_TOKEN`
 
 ## 4) Create access token records
 

@@ -212,6 +212,56 @@ export class MainView extends LitElement {
             transform: none;
             box-shadow: none;
         }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+            padding: 20px;
+        }
+
+        .modal-card {
+            width: 100%;
+            max-width: 440px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: var(--bg-surface);
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .modal-title {
+            margin: 0;
+            font-size: 18px;
+            font-weight: var(--font-weight-semibold);
+            color: var(--text-primary);
+        }
+
+        .modal-text {
+            margin: 0;
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .contact-number {
+            color: var(--text-primary);
+            font-weight: 700;
+            text-decoration: none;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            padding-top: 6px;
+        }
     `;
 
     static properties = {
@@ -226,6 +276,7 @@ export class MainView extends LitElement {
         onRecalibrate: { type: Function },
         _token: { state: true },
         _tokenErrorMessage: { state: true },
+        _showUpgradeDialog: { state: true },
     };
 
     constructor() {
@@ -242,6 +293,7 @@ export class MainView extends LitElement {
 
         this._token = '';
         this._tokenErrorMessage = '';
+        this._showUpgradeDialog = false;
 
         this.boundKeydownHandler = this._handleKeydown.bind(this);
         this._loadFromStorage();
@@ -278,6 +330,7 @@ export class MainView extends LitElement {
     async _saveToken(val) {
         this._token = val;
         this._tokenErrorMessage = '';
+        this._showUpgradeDialog = false;
         await hintio.storage.setAccessToken(val);
         this.requestUpdate();
     }
@@ -308,6 +361,8 @@ export class MainView extends LitElement {
 
     triggerApiKeyError(message = 'Access token is invalid or expired.') {
         this._tokenErrorMessage = message;
+        const normalized = String(message || '').toLowerCase();
+        this._showUpgradeDialog = normalized.includes('invalid') || normalized.includes('expired');
         this.requestUpdate();
     }
 
@@ -344,6 +399,26 @@ export class MainView extends LitElement {
                     </button>
                 </div>
             </div>
+
+            ${this._showUpgradeDialog
+                ? html`
+                    <div class="modal-backdrop">
+                        <div class="modal-card">
+                            <h2 class="modal-title">Upgrade Required</h2>
+                            <p class="modal-text">
+                                This key is no longer valid. Contact
+                                <a class="contact-number" href="tel:+917448865095">+917448865095</a>
+                                to upgrade to Pro/Lifetime plan.
+                            </p>
+                            <div class="modal-actions">
+                                <button class="start-button" @click=${() => { this._showUpgradeDialog = false; this.requestUpdate(); }}>
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `
+                : ''}
         `;
     }
 }
