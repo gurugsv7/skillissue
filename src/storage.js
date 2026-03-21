@@ -211,6 +211,7 @@ function sanitizeCredentialsPatch(credentialsPatch) {
     ensurePlainObject(credentialsPatch, 'credentials');
     const sanitized = {};
     const tokenRegex = /^SKI-[A-Za-z0-9_-]{20,252}$/;
+    const genericTokenRegex = /^[A-Za-z0-9_-]{6,256}$/;
 
     for (const [key, value] of Object.entries(credentialsPatch)) {
         if (!Object.prototype.hasOwnProperty.call(DEFAULT_CREDENTIALS, key)) {
@@ -230,7 +231,7 @@ function sanitizeCredentialsPatch(credentialsPatch) {
 
         if (key === 'cloudToken') {
             const tokenValue = sanitizeText(String(value), { fieldName: 'credentials.cloudToken', maxLength: 256, multiline: false });
-            if (tokenValue && !tokenRegex.test(tokenValue)) {
+            if (tokenValue && !tokenRegex.test(tokenValue) && !genericTokenRegex.test(tokenValue)) {
                 throw new Error('credentials.cloudToken has invalid format');
             }
             sanitized[key] = tokenValue;

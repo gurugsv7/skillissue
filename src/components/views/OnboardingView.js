@@ -255,6 +255,18 @@ export class OnboardingView extends LitElement {
         this.onComplete = () => {};
     }
 
+    _openHelpGuide() {
+        const helpUrl = 'https://www.hintio.tech/help';
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.invoke('open-external', helpUrl).catch((error) => {
+                console.error('Failed to open help guide:', error);
+            });
+            return;
+        }
+        window.open(helpUrl, '_blank', 'noopener,noreferrer');
+    }
+
     handleContextInput(e) {
         this.contextText = e.target.value;
     }
@@ -272,6 +284,7 @@ export class OnboardingView extends LitElement {
             <div class="card">
                 <div class="step-indicator">
                     <div class="step-dot active"></div>
+                    <div class="step-dot"></div>
                     <div class="step-dot"></div>
                 </div>
                 
@@ -319,6 +332,7 @@ export class OnboardingView extends LitElement {
                 <div class="step-indicator">
                     <div class="step-dot active"></div>
                     <div class="step-dot active"></div>
+                    <div class="step-dot"></div>
                 </div>
 
                 <div class="header-group">
@@ -338,8 +352,49 @@ export class OnboardingView extends LitElement {
                         <span class="icon">arrow_back</span> Back
                     </button>
                     ${!this.contextText.trim() ? html`<span class="skip-hint">You can add this later.</span>` : ''}
+                    <button class="btn-primary" @click=${() => { this.currentSlide = 2; }}>
+                        Continue
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    renderSlideThree() {
+        return html`
+            <div class="card">
+                <div class="step-indicator">
+                    <div class="step-dot active"></div>
+                    <div class="step-dot active"></div>
+                    <div class="step-dot active"></div>
+                </div>
+
+                <div class="header-group">
+                    <div class="title">Read this before start</div>
+                    <div class="subtitle">
+                        Before using your access key, check this help guide for proper instructions on usage.
+                    </div>
+                </div>
+
+                <div class="feature-list" style="margin-bottom: 28px;">
+                    <div class="feature-item">
+                        <div class="feature-icon-wrap"><span class="icon">menu_book</span></div>
+                        <div class="feature-text">
+                            <strong>Usage Help Guide</strong>
+                            <span>Open the guide to avoid common mistakes and use your key correctly.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button class="btn-secondary" @click=${() => { this.currentSlide = 1; }}>
+                        <span class="icon">arrow_back</span> Back
+                    </button>
+                    <button class="btn-secondary" @click=${() => this._openHelpGuide()}>
+                        Open Help Guide
+                    </button>
                     <button class="btn-primary" @click=${this.completeOnboarding}>
-                        Launch Hintio
+                        Go to Start Session
                     </button>
                 </div>
             </div>
@@ -349,7 +404,11 @@ export class OnboardingView extends LitElement {
     render() {
         return html`
             <div class="onboarding">
-                ${this.currentSlide === 0 ? this.renderSlideOne() : this.renderSlideTwo()}
+                ${this.currentSlide === 0
+                    ? this.renderSlideOne()
+                    : this.currentSlide === 1
+                        ? this.renderSlideTwo()
+                        : this.renderSlideThree()}
             </div>
         `;
     }

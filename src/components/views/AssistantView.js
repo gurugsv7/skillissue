@@ -320,11 +320,26 @@ export class AssistantView extends LitElement {
             border-radius: 100px;
             padding: 0 var(--space-md);
             height: 32px;
-            transition: border-color var(--transition);
+            transition: all var(--transition);
         }
 
         .input-bar-inner:focus-within {
             border-color: var(--accent);
+        }
+
+        .input-bar.expanded .input-bar-inner {
+            border-radius: var(--radius-md);
+            height: auto;
+            min-height: 120px;
+            padding: var(--space-md);
+            align-items: flex-start;
+        }
+
+        .input-bar.expanded .input-bar-inner input {
+            padding: var(--space-xs) 0;
+            min-height: 32px;
+            word-wrap: break-word;
+            white-space: pre-wrap;
         }
 
         .input-bar-inner input {
@@ -506,6 +521,7 @@ export class AssistantView extends LitElement {
         isAnalyzing: { type: Boolean, state: true },
         errorContent: { type: String },
         _errorPanelOpen: { type: Boolean, state: true },
+        _inputExpanded: { type: Boolean, state: true },
     };
 
     constructor() {
@@ -518,6 +534,7 @@ export class AssistantView extends LitElement {
         this._animFrame = null;
         this.errorContent = '';
         this._errorPanelOpen = false;
+        this._inputExpanded = false;
     }
 
     getProfileNames() {
@@ -738,6 +755,27 @@ export class AssistantView extends LitElement {
             e.preventDefault();
             this.handleSendText();
         }
+        // Allow Shift+Enter for newlines in expanded mode
+        if (e.key === 'Enter' && e.shiftKey && this._inputExpanded) {
+            // Let default newline behavior happen
+            return;
+        }
+    }
+
+    toggleInputExpanded() {
+        this._inputExpanded = !this._inputExpanded;
+        if (this._inputExpanded) {
+            setTimeout(() => {
+                const textInput = this.shadowRoot.querySelector('#textInput');
+                if (textInput) textInput.focus();
+            }, 0);
+        }
+        this.requestUpdate();
+    }
+
+    closeInputExpanded() {
+        this._inputExpanded = false;
+        this.requestUpdate();
     }
 
     async handleScreenAnswer() {
@@ -921,9 +959,6 @@ export class AssistantView extends LitElement {
             }
         }
 
-        if (changedProperties.has('errorContent') && this.errorContent) {
-            this._errorPanelOpen = true;
-        }
     }
 
     updateResponseContent() {
@@ -1037,7 +1072,7 @@ export class AssistantView extends LitElement {
                 </div>
             ` : ''}
 
-            <div class="input-bar">
+            <div class="input-bar ${this._inputExpanded ? 'expanded' : ''}">
                 <div class="input-bar-inner">
                     <input
                         type="text"

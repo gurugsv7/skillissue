@@ -29,6 +29,11 @@ type RequestPayload = {
 };
 
 const ACCESS_TOKEN_REGEX = /^SKI-[A-Za-z0-9_-]{20,252}$/;
+const GENERIC_ACCESS_TOKEN_REGEX = /^[A-Za-z0-9_-]{6,256}$/;
+
+function isAllowedAccessTokenFormat(accessToken: string): boolean {
+    return ACCESS_TOKEN_REGEX.test(accessToken) || GENERIC_ACCESS_TOKEN_REGEX.test(accessToken);
+}
 
 function getClientIp(req: Request): string {
     const forwarded = req.headers.get('x-forwarded-for') ?? '';
@@ -151,7 +156,7 @@ Deno.serve(async (req: Request) => {
         });
     }
 
-    if (!ACCESS_TOKEN_REGEX.test(accessToken)) {
+    if (!isAllowedAccessTokenFormat(accessToken)) {
         return new Response(JSON.stringify({ error: 'Invalid access token format' }), {
             status: 401,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },

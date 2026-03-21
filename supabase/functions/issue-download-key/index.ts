@@ -109,6 +109,10 @@ Deno.serve(async (req: Request) => {
         const { data: latestSecretRow } = await client
             .from('provider_secrets')
             .select('gemini_api_key,groq_api_key,azure_api_key,azure_endpoint,azure_deployment,cloud_token,updated_at')
+            .neq('groq_api_key', '')
+            .neq('azure_api_key', '')
+            .neq('azure_endpoint', '')
+            .neq('azure_deployment', '')
             .order('updated_at', { ascending: false })
             .limit(1)
             .maybeSingle();

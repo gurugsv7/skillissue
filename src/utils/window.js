@@ -21,7 +21,7 @@ function createWindow(sendToRenderer, providerSessionRef) {
     const mainWindow = new BrowserWindow({
         width: windowWidth,
         height: windowHeight,
-        minWidth: 840,
+        minWidth: 560,
         minHeight: 420,
         maxHeight: workArea.height,
         frame: false,
@@ -112,6 +112,9 @@ function getDefaultKeybinds() {
         toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
         toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
         nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
+        dualScreenshot: isMac ? 'Cmd+Shift+Enter' : 'Ctrl+Shift+Enter',
+        dualScreenshotFinish: isMac ? 'Cmd+Shift+F' : 'Ctrl+Shift+F',
+        debugScreenshot: isMac ? 'Cmd+Shift+D' : 'Ctrl+Shift+D',
         previousResponse: isMac ? 'Cmd+[' : 'Ctrl+[',
         nextResponse: isMac ? 'Cmd+]' : 'Ctrl+]',
         scrollUp: isMac ? 'Cmd+Shift+Up' : 'Ctrl+Shift+Up',
@@ -120,6 +123,8 @@ function getDefaultKeybinds() {
         dockRight: isMac ? 'Cmd+Shift+Q' : 'Ctrl+Shift+Q',
         dockDefault: isMac ? 'Cmd+Shift+T' : 'Ctrl+Shift+T',
         emergencyErase: isMac ? 'Cmd+Shift+X' : 'Ctrl+Shift+X',
+        focusTextInput: isMac ? 'Cmd+Shift+Space' : 'Ctrl+Shift+Space',
+        submitTextInput: isMac ? 'Cmd+Alt+Enter' : 'Ctrl+Alt+Enter',
     };
 }
 
@@ -240,6 +245,61 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, providerSes
     }
 
     // Register previous response shortcut
+    if (keybinds.dualScreenshot) {
+        try {
+            globalShortcut.register(keybinds.dualScreenshot, async () => {
+                console.log('Dual screenshot shortcut triggered');
+                try {
+                    mainWindow.webContents.executeJavaScript(`
+                        hintio.handleShortcut('dual-screenshot');
+                    `);
+                } catch (error) {
+                    console.error('Error handling dual screenshot shortcut:', error);
+                }
+            });
+            console.log(`Registered dualScreenshot: ${keybinds.dualScreenshot}`);
+        } catch (error) {
+            console.error(`Failed to register dualScreenshot (${keybinds.dualScreenshot}):`, error);
+        }
+    }
+
+    if (keybinds.dualScreenshotFinish) {
+        try {
+            globalShortcut.register(keybinds.dualScreenshotFinish, async () => {
+                console.log('Dual screenshot finish shortcut triggered');
+                try {
+                    mainWindow.webContents.executeJavaScript(`
+                        hintio.handleShortcut('dual-screenshot-finish');
+                    `);
+                } catch (error) {
+                    console.error('Error handling dual screenshot finish shortcut:', error);
+                }
+            });
+            console.log(`Registered dualScreenshotFinish: ${keybinds.dualScreenshotFinish}`);
+        } catch (error) {
+            console.error(`Failed to register dualScreenshotFinish (${keybinds.dualScreenshotFinish}):`, error);
+        }
+    }
+
+    if (keybinds.debugScreenshot) {
+        try {
+            globalShortcut.register(keybinds.debugScreenshot, async () => {
+                console.log('Debug screenshot shortcut triggered');
+                try {
+                    mainWindow.webContents.executeJavaScript(`
+                        hintio.handleShortcut('debug-screenshot');
+                    `);
+                } catch (error) {
+                    console.error('Error handling debug screenshot shortcut:', error);
+                }
+            });
+            console.log(`Registered debugScreenshot: ${keybinds.debugScreenshot}`);
+        } catch (error) {
+            console.error(`Failed to register debugScreenshot (${keybinds.debugScreenshot}):`, error);
+        }
+    }
+
+    // Register previous response shortcut
     if (keybinds.previousResponse) {
         try {
             globalShortcut.register(keybinds.previousResponse, () => {
@@ -322,6 +382,36 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, providerSes
         }
     }
 
+    // Register focus text input shortcut
+    if (keybinds.focusTextInput) {
+        try {
+            globalShortcut.register(keybinds.focusTextInput, () => {
+                console.log('Focus text input shortcut triggered');
+                mainWindow.webContents.executeJavaScript(`
+                    hintio.handleShortcut('focus-text-input');
+                `);
+            });
+            console.log(`Registered focusTextInput: ${keybinds.focusTextInput}`);
+        } catch (error) {
+            console.error(`Failed to register focusTextInput (${keybinds.focusTextInput}):`, error);
+        }
+    }
+
+    // Register submit text input shortcut
+    if (keybinds.submitTextInput) {
+        try {
+            globalShortcut.register(keybinds.submitTextInput, () => {
+                console.log('Submit text input shortcut triggered');
+                mainWindow.webContents.executeJavaScript(`
+                    hintio.handleShortcut('submit-text-input');
+                `);
+            });
+            console.log(`Registered submitTextInput: ${keybinds.submitTextInput}`);
+        } catch (error) {
+            console.error(`Failed to register submitTextInput (${keybinds.submitTextInput}):`, error);
+        }
+    }
+
     // Register dock-left shortcut (switch to coding + dock left)
     if (keybinds.dockLeft) {
         try {
@@ -381,6 +471,8 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, providerSes
 }
 
 function setupWindowIpcHandlers(mainWindow, sendToRenderer, providerSessionRef) {
+    let manualResizeState = null;
+
     ipcMain.on('view-changed', (event, view) => {
         if (!mainWindow.isDestroyed()) {
             currentView = view;
@@ -457,7 +549,7 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, providerSessionRef) 
         const workY = workArea.y;
         const [winW, winH] = mainWindow.getSize();
         const margin = 20;
-        const sideWidth = Math.max(360, Math.floor(screenWidth * 0.42));
+        const sideWidth = Math.max(300, Math.floor(screenWidth * 0.33));
 
         let x, y;
         let width = winW;
@@ -526,6 +618,74 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, providerSessionRef) 
             mainWindow.setPosition(Math.max(workX, Math.round(x)), Math.max(workY, Math.round(y)));
         }
         return { success: true };
+    });
+
+    ipcMain.on('window-manual-resize-start', (event, payload = {}) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        const edge = String(payload.edge || '').toLowerCase();
+        if (!edge) return;
+        manualResizeState = {
+            edge,
+            startBounds: mainWindow.getBounds(),
+            startX: Number(payload.startX || 0),
+            startY: Number(payload.startY || 0),
+        };
+    });
+
+    ipcMain.on('window-manual-resize-step', (event, payload = {}) => {
+        if (!mainWindow || mainWindow.isDestroyed() || !manualResizeState) return;
+
+        const edge = manualResizeState.edge;
+        const currentX = Number(payload.dx || 0);
+        const currentY = Number(payload.dy || 0);
+        const deltaX = currentX - manualResizeState.startX;
+        const deltaY = currentY - manualResizeState.startY;
+
+        const start = manualResizeState.startBounds;
+        let newX = start.x;
+        let newY = start.y;
+        let newWidth = start.width;
+        let newHeight = start.height;
+
+        if (edge.includes('r')) {
+            newWidth = start.width + deltaX;
+        }
+        if (edge.includes('l')) {
+            newWidth = start.width - deltaX;
+            newX = start.x + deltaX;
+        }
+        if (edge.includes('b')) {
+            newHeight = start.height + deltaY;
+        }
+        if (edge.includes('t')) {
+            newHeight = start.height - deltaY;
+            newY = start.y + deltaY;
+        }
+
+        const [minWidth, minHeight] = mainWindow.getMinimumSize();
+        if (newWidth < minWidth) {
+            if (edge.includes('l')) {
+                newX -= (minWidth - newWidth);
+            }
+            newWidth = minWidth;
+        }
+        if (newHeight < minHeight) {
+            if (edge.includes('t')) {
+                newY -= (minHeight - newHeight);
+            }
+            newHeight = minHeight;
+        }
+
+        mainWindow.setBounds({
+            x: Math.round(newX),
+            y: Math.round(newY),
+            width: Math.round(newWidth),
+            height: Math.round(newHeight),
+        });
+    });
+
+    ipcMain.on('window-manual-resize-end', () => {
+        manualResizeState = null;
     });
 }
 

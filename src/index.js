@@ -5,6 +5,7 @@ if (require('electron-squirrel-startup')) {
 const { app, BrowserWindow, shell, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 const { createWindow, updateGlobalShortcuts } = require('./utils/window');
 const { setupProviderRuntimeIpcHandlers, stopMacOSAudioCapture, sendToRenderer, clearRuntimeProviderSecrets } = require('./utils/providerRuntime');
 const storage = require('./storage');
@@ -52,6 +53,56 @@ function createMainWindow() {
     return mainWindow;
 }
 
+const LEGACY_UNINSTALL_KEY_CANDIDATES = ['GSV', 'CheatingDaddy', 'Cheating-Daddy', 'Cheating Daddy', 'cheating-daddy'];
+const LEGACY_INSTALL_PATH_PATTERN = /appdata\\local\\(?:gsv|cheatingdaddy|cheating-daddy|cheating daddy)\\update\.exe/i;
+
+function queryWindowsRegistry(args) {
+    try {
+        return execFileSync('reg', args, {
+            encoding: 'utf8',
+            windowsHide: true,
+        });
+    } catch (error) {
+        return '';
+    }
+}
+
+function extractRegistryValue(regQueryOutput, keyName) {
+    if (!regQueryOutput) return '';
+    const escapedKeyName = keyName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matcher = new RegExp(`^\\s*${escapedKeyName}\\s+REG_\\w+\\s+(.+)$`, 'im');
+    const match = regQueryOutput.match(matcher);
+    return match?.[1]?.trim() || '';
+}
+
+function cleanupLegacyWindowsUninstallEntries() {
+    if (process.platform !== 'win32') return;
+
+    const uninstallRoot = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall';
+
+    for (const keyName of LEGACY_UNINSTALL_KEY_CANDIDATES) {
+        const keyPath = `${uninstallRoot}\\${keyName}`;
+        const keyDetails = queryWindowsRegistry(['query', keyPath]);
+        if (!keyDetails) continue;
+
+        const displayName = extractRegistryValue(queryWindowsRegistry(['query', keyPath, '/v', 'DisplayName']), 'DisplayName');
+        const publisher = extractRegistryValue(queryWindowsRegistry(['query', keyPath, '/v', 'Publisher']), 'Publisher');
+        const uninstallString = extractRegistryValue(queryWindowsRegistry(['query', keyPath, '/v', 'UninstallString']), 'UninstallString');
+        const isKnownLegacyPublisher = /sohzm/i.test(publisher);
+        const isKnownLegacyName = /(gsv|cheating\s*daddy|cheating-daddy|cheatingdaddy)/i.test(displayName || keyName);
+        const isKnownLegacyInstallPath = LEGACY_INSTALL_PATH_PATTERN.test(uninstallString);
+
+        if (!isKnownLegacyPublisher && !isKnownLegacyName && !isKnownLegacyInstallPath) {
+            continue;
+        }
+
+        const deleteResult = queryWindowsRegistry(['delete', keyPath, '/f']);
+        if (deleteResult) {
+            console.log(`Removed legacy uninstall entry: ${keyPath}`);
+        }
+    }
+}
+
 function setupAutoUpdates() {
     if (!app.isPackaged || !autoUpdater) {
         return;
@@ -86,6 +137,8 @@ function setupAutoUpdates() {
 }
 
 app.whenReady().then(async () => {
+    cleanupLegacyWindowsUninstallEntries();
+
     // Initialize storage (checks version, resets if needed)
     storage.initializeStorage();
 
@@ -561,6 +614,83 @@ function setupGeneralIpcHandlers() {
             return { success: true, filePath };
         } catch (error) {
             console.error('Error saving text file:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('save-debug-screenshot', async (event, payload = {}) => {
+        try {
+            ensurePlainObject(payload, 'save-debug-screenshot payload');
+
+            const rawBase64 = String(payload.base64 || '').trim();
+            if (!rawBase64) {
+                return { success: false, error: 'Missing screenshot data' };
+            }
+
+            const mode = sanitizeText(String(payload.mode || 'manual'), {
+                fieldName: 'screenshot mode',
+                maxLength: 32,
+                multiline: false,
+            })
+                .toLowerCase()
+                .replace(/[^a-z0-9_-]/g, '') || 'manual';
+
+            const screenshotBuffer = Buffer.from(rawBase64, 'base64');
+            if (!screenshotBuffer || screenshotBuffer.length < 1000) {
+                return { success: false, error: 'Invalid screenshot data' };
+            }
+
+            const debugDir = path.join(app.getPath('pictures'), 'hintio-debug', 'screenshots');
+            fs.mkdirSync(debugDir, { recursive: true });
+
+            const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+            const fileName = ensureSafeFilename(payload.fileName, `hintio-${mode}-${timestamp}.jpg`);
+            const outputPath = path.join(debugDir, fileName);
+
+            fs.writeFileSync(outputPath, screenshotBuffer);
+            return { success: true, filePath: outputPath };
+        } catch (error) {
+            console.error('Error saving debug screenshot:', error);
+            return { success: false, error: error.message };
+        }
+    });
+
+    ipcMain.handle('send-telegram-image', async (event, payload = {}) => {
+        try {
+            ensurePlainObject(payload, 'send-telegram-image payload');
+
+            const base64Image = String(payload.base64 || '').trim();
+            if (!base64Image) {
+                return { success: false, error: 'Missing image data' };
+            }
+
+            const caption = sanitizeText(String(payload.caption || 'Telegram image analysis'), {
+                fieldName: 'image caption',
+                maxLength: 500,
+                multiline: true,
+            });
+
+            const buffer = Buffer.from(base64Image, 'base64');
+            if (!buffer || buffer.length < 500) {
+                return { success: false, error: 'Invalid image data' };
+            }
+
+            // Use the standard image analysis pipeline via providerRuntime
+            // This will leverage existing send-image-content handler
+            const { ipcRenderer } = require('electron');
+            if (mainWindow && mainWindow.webContents) {
+                // Forward to renderer to use existing image analysis
+                mainWindow.webContents.send('telegram-image-received', {
+                    base64: base64Image,
+                    caption: caption,
+                    metadata: payload.metadata || {},
+                });
+                return { success: true, message: 'Image forwarded for analysis' };
+            }
+
+            return { success: false, error: 'Main window not available' };
+        } catch (error) {
+            console.error('Error handling telegram image:', error);
             return { success: false, error: error.message };
         }
     });

@@ -51,8 +51,11 @@ let lastAcceptedTranscriptNormalized = '';
 let lastAcceptedTranscriptAt = 0;
 let isAzureResponseInFlight = false;
 let pendingInterviewerTranscript = '';
+let trialSessionTimeoutHandle = null;
+let isTrialSessionTimedOut = false;
 
 const PROVIDER_SECRETS_CACHE_TTL_MS = 30 * 60 * 1000;
+const THREE_USAGE_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
 const MIN_TURN_WORDS = 4;
 const DUPLICATE_TRANSCRIPT_WINDOW_MS = 25000;
 const MIN_MEANINGFUL_WORDS = 2;
@@ -338,6 +341,43 @@ function sendToRenderer(channel, data) {
     }
 }
 
+function clearTrialSessionTimeout() {
+    if (trialSessionTimeoutHandle) {
+        clearTimeout(trialSessionTimeoutHandle);
+        trialSessionTimeoutHandle = null;
+    }
+    isTrialSessionTimedOut = false;
+}
+
+function startThreeUsageSessionTimeout(providerSessionRef) {
+    clearTrialSessionTimeout();
+    trialSessionTimeoutHandle = setTimeout(async () => {
+        isTrialSessionTimedOut = true;
+        pendingInterviewerTranscript = '';
+        isAzureResponseInFlight = false;
+
+        try {
+            if (speechStt.isSpeechSTTActive()) {
+                speechStt.stopSpeechSTT();
+            }
+        } catch (error) {
+            console.warn('Failed stopping STT on timeout:', error.message);
+        }
+
+        if (providerSessionRef?.current) {
+            try {
+                await providerSessionRef.current.close();
+            } catch (error) {
+                console.warn('Failed closing provider session on timeout:', error.message);
+            }
+            providerSessionRef.current = null;
+        }
+
+        sendToRenderer('new-response', 'User timedout');
+        sendToRenderer('update-status', 'User timedout');
+    }, THREE_USAGE_SESSION_TIMEOUT_MS);
+}
+
 // Build context message for session restoration
 function buildContextMessage() {
     const lastTurns = conversationHistory.slice(-20);
@@ -358,6 +398,7 @@ function initializeNewSession(profile = null, customPrompt = null) {
     screenAnalysisHistory = [];
     groqConversationHistory = [];
     pendingInterviewerTranscript = '';
+    clearTrialSessionTimeout();
     currentProfile = profile;
     currentCustomPrompt = customPrompt;
     console.log('New conversation session started:', currentSessionId, 'profile:', profile);
@@ -1229,7 +1270,10 @@ async function sendToAzure(transcription) {
     }
 }
 
-async function sendImageToAzure(base64Data, prompt) {
+async function sendImageToAzure(imagePayload, prompt, options = {}) {
+    const skipPostProcessing = Boolean(options.skipPostProcessing);
+    const mode = String(options.mode || '').toLowerCase();
+    const isDebugMode = mode === 'debug';
     const azureApiKey = getEffectiveAzureApiKey();
     const azureEndpoint = getEffectiveAzureEndpoint();
     const azureDeployment = getEffectiveAzureDeployment();
@@ -1244,7 +1288,27 @@ async function sendImageToAzure(base64Data, prompt) {
         baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
         const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${apiVersion}`;
 
-        const systemInstruction = `You provide direct, minimal answers.
+        const systemInstruction = isDebugMode
+            ? `You are a debugging assistant for coding interview failed test screenshots.
+
+Return a precise, line-level minimal patch only.
+Mandatory output block:
+===CODE_ISSUE_START===
+- Line <n>: <issue>
+- Why it fails: <reason>
+- Fix: <smallest correction>
+- Patched snippet:
+\`\`\`python
+<only changed lines>
+\`\`\`
+===CODE_ISSUE_END===
+
+Rules:
+- Use approx line numbers if exact lines are not visible.
+- Do not rewrite full code unless absolutely necessary.
+- Include syntax/indentation fixes when relevant.
+- Always include at least one patched snippet.`
+            : `You provide direct, minimal answers.
 
     Question detection:
     - If one problem statement is followed by Input/Output/Example/Explanation blocks, treat it as ONE question.
@@ -1267,7 +1331,33 @@ async function sendImageToAzure(base64Data, prompt) {
 
     Match the simplicity of the question. Don't over-engineer or add unnecessary code.`;
 
-        console.log(`Sending image to Azure OpenAI (${azureDeployment})...`);
+        console.log(`\n[AZURE VISION] Sending image to Azure OpenAI (${azureDeployment})...`);
+
+        const imageDataList = Array.isArray(imagePayload) ? imagePayload : [imagePayload];
+        
+        // Log image metadata
+        console.log(`[AZURE VISION] Processing ${imageDataList.length} image(s)`);
+        for (let i = 0; i < imageDataList.length; i++) {
+            const imgBase64 = imageDataList[i];
+            const sizeKB = (imgBase64.length / 1024).toFixed(2);
+            console.log(`[AZURE VISION]   Image ${i + 1}: ${sizeKB} KB`);
+        }
+
+        const userContent = imageDataList
+            .filter((img) => typeof img === 'string' && img.length > 100)
+            .map((img) => ({
+                type: 'image_url',
+                image_url: {
+                    url: `data:image/jpeg;base64,${img}`,
+                },
+            }));
+
+        if (userContent.length === 0) {
+            return { success: false, error: 'No valid image payload provided' };
+        }
+
+        console.log(`[AZURE VISION] Prompt: "${prompt?.slice(0, 100)}${prompt && prompt.length > 100 ? '...' : ''}"`);
+        userContent.push({ type: 'text', text: String(prompt || '') });
 
         const response = await fetch(url, {
             method: 'POST',
@@ -1280,15 +1370,7 @@ async function sendImageToAzure(base64Data, prompt) {
                     { role: 'system', content: systemInstruction },
                     {
                         role: 'user',
-                        content: [
-                            {
-                                type: 'image_url',
-                                image_url: {
-                                    url: `data:image/jpeg;base64,${base64Data}`,
-                                },
-                            },
-                            { type: 'text', text: prompt },
-                        ],
+                        content: userContent,
                     },
                 ],
                 stream: true,
@@ -1299,7 +1381,7 @@ async function sendImageToAzure(base64Data, prompt) {
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('Azure OpenAI image API error:', response.status, errorText);
+            console.error('[AZURE VISION] API error:', response.status, errorText);
             return { success: false, error: `Azure error: ${response.status}` };
         }
 
@@ -1307,6 +1389,8 @@ async function sendImageToAzure(base64Data, prompt) {
         const decoder = new TextDecoder();
         let fullText = '';
         let isFirst = true;
+
+        console.log('[AZURE VISION] Receiving response from Azure...');
 
         while (true) {
             const { done, value } = await reader.read();
@@ -1335,23 +1419,43 @@ async function sendImageToAzure(base64Data, prompt) {
             }
         }
 
-        const finalResponse = await maybeHumanizeCodeResponse(prompt || '', fullText, 'azure');
-        if (finalResponse && finalResponse !== fullText) {
+        // Log extracted text/analysis from Azure Vision
+        console.log('\n[AZURE VISION OCR/ANALYSIS OUTPUT]');
+        console.log('─'.repeat(60));
+        console.log(fullText);
+        console.log('─'.repeat(60) + '\n');
+
+        let finalResponse = skipPostProcessing
+            ? fullText
+            : await maybeHumanizeCodeResponse(prompt || '', fullText, 'azure');
+
+        if (isDebugMode && !/===CODE_ISSUE_START===/i.test(finalResponse || '')) {
+            const safeBody = String(finalResponse || fullText || '').trim();
+            finalResponse = `===CODE_ISSUE_START===\n${safeBody || 'No detailed diagnosis generated.'}\n- Fix format missing: line-level patch was not generated.\n- Suggested next step: capture failed test output + relevant code lines together and retry.\n===CODE_ISSUE_END===`;
             sendToRenderer(isFirst ? 'new-response' : 'update-response', finalResponse);
             isFirst = false;
         }
 
-        console.log(`Azure image response completed (${azureDeployment})`);
+        if (!skipPostProcessing && finalResponse && finalResponse !== fullText) {
+            sendToRenderer(isFirst ? 'new-response' : 'update-response', finalResponse);
+            isFirst = false;
+        }
+
+        console.log(`[AZURE VISION] Response completed (${azureDeployment})`);
         saveScreenAnalysis(prompt, finalResponse || fullText, azureDeployment);
-        schedulePostAnswerSelfHeal({
-            transcription: prompt || '',
-            response: finalResponse || fullText,
-            provider: 'azure',
-            persistType: 'screen',
-        });
+
+        if (!skipPostProcessing) {
+            schedulePostAnswerSelfHeal({
+                transcription: prompt || '',
+                response: finalResponse || fullText,
+                provider: 'azure',
+                persistType: 'screen',
+            });
+        }
+
         return { success: true, text: finalResponse || fullText, model: azureDeployment };
     } catch (error) {
-        console.error('Error sending image to Azure:', error);
+        console.error('[AZURE VISION] Error sending image to Azure:', error);
         return { success: false, error: error.message };
     }
 }
@@ -1968,29 +2072,34 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
     ipcMain.handle('initialize-azure', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
         currentProviderMode = 'token';
+        clearTrialSessionTimeout();
 
         try {
             ensureStringWithinLimit(apiKey, 256, 'Access token');
             ensureStringWithinLimit(customPrompt || '', 16_000, 'Custom prompt');
             enforceIpcRateLimit(event, 'auth.initialize-azure', RATE_LIMIT_POLICIES.initializeAzure);
             enforceTokenScopedLimit('auth.initialize-azure.token', apiKey, RATE_LIMIT_POLICIES.initializeAzure);
-            await resolveProviderSecrets(apiKey, { consume: true });
+            const resolved = await resolveProviderSecrets(apiKey, { consume: true });
+            const maxInterviews = Number(resolved?.data?.maxInterviews || 0);
+            if (maxInterviews === 3) {
+                startThreeUsageSessionTimeout(providerSessionRef);
+            }
         } catch (error) {
             console.error('[Init] Failed to resolve provider secrets:', error.message);
             sendToRenderer('update-status', 'Invalid access token or Supabase unavailable');
-            return false;
+            return { success: false, error: error.message || 'Invalid access token or Supabase unavailable' };
         }
 
         if (!hasAzureKey()) {
             sendToRenderer('update-status', 'Azure OpenAI credentials are not configured');
-            return false;
+            return { success: false, error: 'Azure OpenAI credentials are not configured' };
         }
 
         const groqKey = getEffectiveGroqApiKey();
         if (!groqKey) {
             console.error('[Init] Azure mode requires a Groq API key for STT — add it in settings');
             sendToRenderer('update-status', 'Groq STT key not configured in Supabase');
-            return false;
+            return { success: false, error: 'Groq STT key not configured in Supabase' };
         }
 
         currentProfile = profile;
@@ -2000,6 +2109,11 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         initializeNewSession(profile, customPrompt);
 
         speechStt.startSpeechSTT(groqKey, language, (transcription) => {
+            if (isTrialSessionTimedOut) {
+                sendToRenderer('update-status', 'User timedout');
+                return;
+            }
+
             const gate = shouldDispatchInterviewerTurn(transcription);
             if (!gate.accept) {
                 console.log(`[TurnGate] Ignored transcript (${gate.reason}):`, String(transcription || '').slice(0, 120));
@@ -2021,7 +2135,7 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         providerSessionRef.current = null;
         sendToRenderer('update-status', 'Listening...');
         console.log('[Init] Groq Whisper STT started — Azure OpenAI will handle responses');
-        return true;
+        return { success: true };
     });
 
     ipcMain.handle('initialize-local', async () => {
@@ -2030,6 +2144,10 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
     });
 
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
+        if (isTrialSessionTimedOut) {
+            return { success: false, error: 'User timedout' };
+        }
+
         // Azure STT path — push audio to speech-to-text buffer
         if (speechStt.isSpeechSTTActive()) {
             speechStt.pushAudio(data);
@@ -2040,6 +2158,10 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
     // Handle microphone audio on a separate channel
     ipcMain.handle('send-mic-audio-content', async (event, { data, mimeType }) => {
+        if (isTrialSessionTimedOut) {
+            return { success: false, error: 'User timedout' };
+        }
+
         // Azure STT path — mic audio also goes to speech-to-text buffer
         if (speechStt.isSpeechSTTActive()) {
             speechStt.pushAudio(data);
@@ -2048,19 +2170,27 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         return { success: false, error: 'Azure STT is not initialized' };
     });
 
-    ipcMain.handle('send-image-content', async (event, { data, prompt }) => {
+    ipcMain.handle('send-image-content', async (event, { data, images, prompt, mode }) => {
         try {
+            if (isTrialSessionTimedOut) {
+                return { success: false, error: 'User timedout' };
+            }
+
             enforceIpcRateLimit(event, 'session.send-image-content', RATE_LIMIT_POLICIES.sendImage);
-            if (!data || typeof data !== 'string') {
+            const imageList = Array.isArray(images) && images.length > 0 ? images : [data];
+            const validImages = imageList.filter((img) => typeof img === 'string' && img.trim().length > 0);
+
+            if (!validImages.length) {
                 console.error('Invalid image data received');
                 return { success: false, error: 'Invalid image data' };
             }
 
-            const buffer = Buffer.from(data, 'base64');
-
-            if (buffer.length < 1000) {
-                console.error(`Image buffer too small: ${buffer.length} bytes`);
-                return { success: false, error: 'Image buffer too small' };
+            for (const imageBase64 of validImages) {
+                const buffer = Buffer.from(imageBase64, 'base64');
+                if (buffer.length < 1000) {
+                    console.error(`Image buffer too small: ${buffer.length} bytes`);
+                    return { success: false, error: 'Image buffer too small' };
+                }
             }
 
             process.stdout.write('!');
@@ -2069,7 +2199,11 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
                 return { success: false, error: 'Azure OpenAI credentials are not configured' };
             }
 
-            const result = await sendImageToAzure(data, prompt);
+            const isDebugMode = String(mode || '').toLowerCase() === 'debug';
+            const result = await sendImageToAzure(validImages, prompt, {
+                skipPostProcessing: isDebugMode,
+                mode,
+            });
             return result;
         } catch (error) {
             console.error('Error sending image:', error);
@@ -2078,6 +2212,10 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
     });
 
     ipcMain.handle('send-text-message', async (event, text, profile = null) => {
+        if (isTrialSessionTimedOut) {
+            return { success: false, error: 'User timedout' };
+        }
+
         enforceIpcRateLimit(event, 'session.send-text-message', RATE_LIMIT_POLICIES.sendText);
         if (!text || typeof text !== 'string' || text.trim().length === 0) {
             return { success: false, error: 'Invalid text message' };
@@ -2147,6 +2285,7 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
     ipcMain.handle('close-session', async event => {
         try {
+            clearTrialSessionTimeout();
             stopMacOSAudioCapture();
             clearRuntimeProviderSecrets();
 

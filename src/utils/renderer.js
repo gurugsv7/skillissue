@@ -15,10 +15,15 @@ let hiddenVideo = null;
 let offscreenCanvas = null;
 let offscreenContext = null;
 let currentImageQuality = 'medium'; // Store current image quality for manual screenshots
+let pendingDualScreenshotBase64List = [];
+let dualScreenshotTimeoutHandle = null;
+let dualScreenshotRequestInFlight = false;
 let providerSecretsCache = null;
 let providerSecretsToken = '';
 let providerSecretsResolvedAt = 0;
 const PROVIDER_SECRETS_CACHE_TTL_MS = 30 * 60 * 1000;
+const DUAL_SCREENSHOT_WAIT_MS = 20000;
+const MAX_DUAL_SCREENSHOT_IMAGES = 3;
 let lastInitErrorMessage = '';
 
 const isLinux = process.platform === 'linux';
@@ -221,11 +226,17 @@ async function initializeAzure(profile = 'interview', language = 'en-US') {
     }
 
     const prefs = await storage.getPreferences();
-    const success = await ipcRenderer.invoke('initialize-azure', accessToken.trim(), buildCombinedContext(prefs), profile, language);
+    const initResult = await ipcRenderer.invoke('initialize-azure', accessToken.trim(), buildCombinedContext(prefs), profile, language);
+    const success = initResult === true || initResult?.success === true;
     if (success) {
         lastInitErrorMessage = '';
         hintio.setStatus('Live');
         return true;
+    }
+
+    const runtimeError = typeof initResult === 'object' ? (initResult.error || '') : '';
+    if (runtimeError) {
+        lastInitErrorMessage = parseAccessTokenErrorMessage(runtimeError);
     }
 
     if (!lastInitErrorMessage) {
@@ -237,11 +248,20 @@ async function initializeAzure(profile = 'interview', language = 'en-US') {
 
 function parseAccessTokenErrorMessage(errorText = '') {
     const normalized = String(errorText || '').toLowerCase();
+    if (normalized.includes('usage limit') || normalized.includes('interviews used') || normalized.includes('exhausted')) {
+        return 'Access token usage limit reached.';
+    }
     if (normalized.includes('invalid or expired access token')) {
         return 'Access token is invalid or expired.';
     }
     if (normalized.includes('access token is required') || normalized.includes('missing access token')) {
         return 'Access token is required.';
+    }
+    if (normalized.includes('azure openai credentials are not configured')) {
+        return 'Service is not configured right now. Please try again shortly.';
+    }
+    if (normalized.includes('groq stt key not configured')) {
+        return 'Speech service is not configured right now. Please try again shortly.';
     }
     if (normalized.includes('secret resolution failed (403)')) {
         return 'Access token is invalid or expired.';
@@ -730,16 +750,165 @@ where position is one of: left, right, center, top-left, top-right, bottom-left,
 ===CODE_ISSUE_END===
 If no code issues are found, do NOT include the CODE_ISSUE markers at all.`;
 
-async function captureManualScreenshot(imageQuality = null) {
-    console.log('Manual screenshot triggered');
+const DUAL_SCREENSHOT_PROMPT_PREFIX = `You are receiving MULTIPLE screenshots (2 to 3) from the same coding question.
+Treat all screenshots as a single combined context and answer based on the complete question across images.
+If text is split across screenshots, merge it logically before answering.
+
+`;
+
+const DEBUG_SCREENSHOT_PROMPT = `You are debugging a coding interview failed test case from a screenshot.
+
+GOAL:
+- Focus on identifying the exact bug causing failure.
+- Prefer minimal fixes, not full rewrites.
+- If screenshot code is partial, use the previous AI-generated code context provided below.
+
+OUTPUT RULES (STRICT):
+1) Base every claim on visible evidence from screenshot or PREVIOUS_CODE_CONTEXT. Do not invent missing tokens/braces/operators.
+2) If you cite a line, include the exact broken fragment from that line in backticks.
+3) Prioritize compiler/runtime error text visible in screenshot; explain why that specific error happens.
+4) Provide only the smallest changed snippet (not full solution), preserving existing structure.
+5) If evidence is insufficient, say "Need more visible code context" instead of guessing.
+6) Mark uncertainty explicitly; never present uncertain fixes as facts.
+7) If code logic appears correct but compile/parser errors persist, treat it as a COMPATIBILITY issue and propose the smallest compiler-friendly rewrite.
+
+COMPATIBILITY MODE (when compiler/toolchain is strict):
+- Prefer tiny syntax/type-level rewrites before any logic rewrite.
+- Keep algorithm and control-flow identical.
+- Typical safe examples: add missing namespace qualification, make lambda return type explicit, simplify recursive callable signature/type, replace fragile expression forms with equivalent clearer form.
+- Label this as "Compatibility workaround" (not "logic bug") unless evidence proves logic is wrong.
+- Never claim "known compiler bug" as a fact unless error text/context explicitly supports it.
+
+MANDATORY MARKER BLOCK:
+===CODE_ISSUE_START===
+- Line <n or approx n>
+- Locate by search: \`<exact unique fragment to find in code>\`
+- Replace:
+    old: \`<exact old text>\`
+    new: \`<exact new text>\`
+- Classification: <Logic bug | Syntax error | Compatibility workaround>
+- Why it fails: <reason>
+- Fix: <smallest correction>
+- Patched snippet:
+\`\`\`
+<only changed lines, include 1-2 surrounding lines for context>
+\`\`\`
+===CODE_ISSUE_END===
+
+Do NOT replace the entire answer with a fresh full solution unless absolutely required.
+Do NOT output unrelated optimizations.
+Do NOT claim "missing brace/semicolon" unless you can point to the exact unmatched fragment in visible code.
+Do NOT output vague advice. Every fix must include a concrete old->new replacement.
+Do NOT force type changes (e.g., bool -> int) unless needed for compatibility with the shown error.
+`;
+
+function markScreenAnalysisTriggered(mode = 'manual') {
+    const app = hintio.element?.();
+    if (!app) return;
+    app._awaitingScreenAnalysis = true;
+    app._screenAnalysisMode = mode;
+    app._layoutRepositioned = false;
+    app._errorContent = '';
+}
+
+function extractLastCodeBlock(text = '') {
+    const matches = [...String(text || '').matchAll(/```(?:[a-zA-Z0-9_+-]+)?\n([\s\S]*?)```/g)];
+    if (!matches.length) return '';
+    return (matches[matches.length - 1]?.[1] || '').trim();
+}
+
+function buildPreviousCodeContext() {
+    const app = hintio.element?.();
+    const responses = Array.isArray(app?.responses) ? app.responses : [];
+    if (!responses.length) return '';
+
+    let fallbackCode = '';
+    for (let index = responses.length - 1; index >= 0; index -= 1) {
+        const candidate = String(responses[index] || '');
+        const codeBlock = extractLastCodeBlock(candidate);
+        if (codeBlock) {
+            fallbackCode = codeBlock;
+            break;
+        }
+    }
+
+    if (!fallbackCode) {
+        fallbackCode = String(responses[responses.length - 1] || '');
+    }
+
+    if (!fallbackCode.trim()) return '';
+
+    const MAX_CONTEXT_CHARS = 7000;
+    const trimmed = fallbackCode.length > MAX_CONTEXT_CHARS
+        ? fallbackCode.slice(fallbackCode.length - MAX_CONTEXT_CHARS)
+        : fallbackCode;
+
+    return `\n\nPREVIOUS_CODE_CONTEXT (use this if screenshot code is partial):\n\`\`\`\n${trimmed}\n\`\`\``;
+}
+
+function clearPendingDualScreenshotState() {
+    if (dualScreenshotTimeoutHandle) {
+        clearTimeout(dualScreenshotTimeoutHandle);
+        dualScreenshotTimeoutHandle = null;
+    }
+    pendingDualScreenshotBase64List = [];
+}
+
+function armDualScreenshotTimeout() {
+    if (dualScreenshotTimeoutHandle) {
+        clearTimeout(dualScreenshotTimeoutHandle);
+    }
+    dualScreenshotTimeoutHandle = setTimeout(async () => {
+        if (!pendingDualScreenshotBase64List.length || dualScreenshotRequestInFlight) {
+            return;
+        }
+
+        if (pendingDualScreenshotBase64List.length >= 2) {
+            await sendPendingDualScreenshots('timeout');
+            return;
+        }
+
+        console.log('Dual screenshot timed out with only one capture');
+        clearPendingDualScreenshotState();
+        hintio.setStatus('Dual screenshot canceled (need at least 2 captures)');
+    }, DUAL_SCREENSHOT_WAIT_MS);
+}
+
+async function sendPendingDualScreenshots(trigger = 'manual') {
+    if (dualScreenshotRequestInFlight) return;
+    if (pendingDualScreenshotBase64List.length < 2) return;
+
+    const imagesToSend = [...pendingDualScreenshotBase64List];
+    clearPendingDualScreenshotState();
+    dualScreenshotRequestInFlight = true;
+
+    try {
+        hintio.setStatus(`Analyzing ${imagesToSend.length} screenshots...`);
+
+        const result = await ipcRenderer.invoke('send-image-content', {
+            images: imagesToSend,
+            prompt: `${DUAL_SCREENSHOT_PROMPT_PREFIX}${MANUAL_SCREENSHOT_PROMPT}`,
+        });
+
+        if (result.success) {
+            console.log(`${trigger} multi-image response completed from ${result.model}`);
+        } else {
+            console.error('Failed to get multi-image response:', result.error);
+            hintio.addNewResponse(`Error: ${result.error}`);
+        }
+    } finally {
+        dualScreenshotRequestInFlight = false;
+    }
+}
+
+async function captureFrameToBase64(imageQuality = null) {
     const quality = imageQuality || currentImageQuality;
 
     if (!mediaStream) {
         console.error('No media stream available');
-        return;
+        return null;
     }
 
-    // Lazy init of video element
     if (!hiddenVideo) {
         hiddenVideo = document.createElement('video');
         hiddenVideo.srcObject = mediaStream;
@@ -752,20 +921,17 @@ async function captureManualScreenshot(imageQuality = null) {
             hiddenVideo.onloadedmetadata = () => resolve();
         });
 
-        // Lazy init of canvas based on video dimensions
         offscreenCanvas = document.createElement('canvas');
         offscreenCanvas.width = hiddenVideo.videoWidth;
         offscreenCanvas.height = hiddenVideo.videoHeight;
         offscreenContext = offscreenCanvas.getContext('2d');
     }
 
-    // Check if video is ready
     if (hiddenVideo.readyState < 2) {
         console.warn('Video not ready yet, skipping screenshot');
-        return;
+        return null;
     }
 
-    // Downscale to max 1280px wide for faster transfer — vision models don't need 4K
     const MAX_WIDTH = 1280;
     const srcW = hiddenVideo.videoWidth;
     const srcH = hiddenVideo.videoHeight;
@@ -794,49 +960,143 @@ async function captureManualScreenshot(imageQuality = null) {
             qualityValue = 0.6;
     }
 
-    offscreenCanvas.toBlob(
-        async blob => {
-            if (!blob) {
-                console.error('Failed to create blob from canvas');
-                return;
-            }
-
-            const reader = new FileReader();
-            reader.onloadend = async () => {
-                const base64data = reader.result.split(',')[1];
-
-                if (!base64data || base64data.length < 100) {
-                    console.error('Invalid base64 data generated');
-                    return;
+    const base64data = await new Promise(resolve => {
+        offscreenCanvas.toBlob(
+            blob => {
+                if (!blob) {
+                    console.error('Failed to create blob from canvas');
+                    return resolve(null);
                 }
 
-                console.log(`Sending image: ${destW}x${destH}, ~${Math.round(base64data.length / 1024)}KB`);
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const value = reader.result?.split(',')?.[1] || null;
+                    resolve(value);
+                };
+                reader.readAsDataURL(blob);
+            },
+            'image/jpeg',
+            qualityValue
+        );
+    });
 
-                // Send image with prompt to HTTP API (response streams via IPC events)
-                const result = await ipcRenderer.invoke('send-image-content', {
-                    data: base64data,
-                    prompt: MANUAL_SCREENSHOT_PROMPT,
-                });
+    if (!base64data || base64data.length < 100) {
+        console.error('Invalid base64 data generated');
+        return null;
+    }
 
-                if (result.success) {
-                    console.log(`Image response completed from ${result.model}`);
-                    // Response already displayed via streaming events (new-response/update-response)
-                } else {
-                    console.error('Failed to get image response:', result.error);
-                    hintio.addNewResponse(`Error: ${result.error}`);
-                }
-            };
-            reader.readAsDataURL(blob);
-        },
-        'image/jpeg',
-        qualityValue
-    );
+    console.log(`Captured image: ${destW}x${destH}, ~${Math.round(base64data.length / 1024)}KB`);
+    return base64data;
+}
+
+async function captureManualScreenshot(imageQuality = null) {
+    console.log('Manual screenshot triggered');
+    markScreenAnalysisTriggered('manual');
+
+    const base64data = await captureFrameToBase64(imageQuality);
+    if (!base64data) return;
+
+    try {
+        const saveResult = await ipcRenderer.invoke('save-debug-screenshot', {
+            base64: base64data,
+            mode: 'manual',
+        });
+        if (saveResult?.success && saveResult.filePath) {
+            console.log('Saved manual screenshot locally:', saveResult.filePath);
+        } else if (saveResult?.error) {
+            console.warn('Failed to save manual screenshot locally:', saveResult.error);
+        }
+    } catch (error) {
+        console.warn('Error invoking save-debug-screenshot:', error);
+    }
+
+    const result = await ipcRenderer.invoke('send-image-content', {
+        data: base64data,
+        prompt: MANUAL_SCREENSHOT_PROMPT,
+    });
+
+    if (result.success) {
+        console.log(`Image response completed from ${result.model}`);
+    } else {
+        console.error('Failed to get image response:', result.error);
+        hintio.addNewResponse(`Error: ${result.error}`);
+    }
+}
+
+async function captureDualScreenshot(imageQuality = null) {
+    console.log('Dual screenshot shortcut triggered');
+    markScreenAnalysisTriggered('dual');
+
+    if (dualScreenshotRequestInFlight) {
+        console.log('Dual screenshot request already in-flight, ignoring trigger');
+        return;
+    }
+
+    const image = await captureFrameToBase64(imageQuality);
+    if (!image) return;
+
+    pendingDualScreenshotBase64List.push(image);
+
+    if (pendingDualScreenshotBase64List.length >= MAX_DUAL_SCREENSHOT_IMAGES) {
+        await sendPendingDualScreenshots('max-captures');
+        return;
+    }
+
+    armDualScreenshotTimeout();
+
+    if (pendingDualScreenshotBase64List.length === 1) {
+        hintio.setStatus('Captured 1/3 — press dual shortcut again for next page');
+        return;
+    }
+
+    hintio.setStatus('Captured 2/3 — press again for page 3 or wait to auto-send');
+}
+
+async function finishDualScreenshotBatch() {
+    if (dualScreenshotRequestInFlight) {
+        hintio.setStatus('Dual screenshot request already in progress...');
+        return;
+    }
+
+    if (pendingDualScreenshotBase64List.length < 2) {
+        hintio.setStatus('Need at least 2 screenshots before finish');
+        return;
+    }
+
+    await sendPendingDualScreenshots('manual-finish');
+}
+
+async function captureDebugScreenshot(imageQuality = null) {
+    console.log('Debug screenshot shortcut triggered');
+    markScreenAnalysisTriggered('debug');
+
+    const base64data = await captureFrameToBase64(imageQuality);
+    if (!base64data) return;
+
+    hintio.setStatus('Analyzing failed test screenshot...');
+    const prompt = `${DEBUG_SCREENSHOT_PROMPT}${buildPreviousCodeContext()}`;
+
+    const result = await ipcRenderer.invoke('send-image-content', {
+        data: base64data,
+        prompt,
+        mode: 'debug',
+    });
+
+    if (result.success) {
+        console.log(`Debug screenshot response completed from ${result.model}`);
+    } else {
+        console.error('Failed to debug screenshot:', result.error);
+        hintio.addNewResponse(`Error: ${result.error}`);
+    }
 }
 
 // Expose functions to global scope for external access
 window.captureManualScreenshot = captureManualScreenshot;
 
 function stopCapture() {
+    clearPendingDualScreenshotState();
+    dualScreenshotRequestInFlight = false;
+
     if (screenshotInterval) {
         clearInterval(screenshotInterval);
         screenshotInterval = null;
@@ -966,9 +1226,104 @@ ipcRenderer.on('clear-sensitive-data', async () => {
     await storage.clearAll();
 });
 
+// Listen for Telegram image analysis requests
+ipcRenderer.on('telegram-image-received', async (event, data) => {
+    try {
+        const { base64, caption, metadata } = data;
+
+        if (!base64) {
+            console.error('No image data in telegram-image-received event');
+            return;
+        }
+
+        console.log(`\n[TELEGRAM] Image received from Telegram`);
+        console.log(`[TELEGRAM]   Caption: "${caption}"`);
+        console.log(`[TELEGRAM]   Image Size: ${(base64.length / 1024).toFixed(2)} KB`);
+        if (metadata?.userId) console.log(`[TELEGRAM]   From UserID: ${metadata.userId}`);
+        if (metadata?.timestamp) console.log(`[TELEGRAM]   Timestamp: ${new Date(metadata.timestamp * 1000).toISOString()}`);
+
+        // Convert Base64 to image list format expected by send-image-content
+        const imageList = [
+            {
+                type: 'image_url',
+                image_url: {
+                    url: `data:image/jpeg;base64,${base64}`,
+                },
+            },
+        ];
+
+        const systemPrompt = caption || 'Analyze this image and provide detailed insights.';
+
+        // Use the existing send-image-content pipeline
+        const result = await ipcRenderer.invoke('send-image-content', {
+            imageList,
+            systemMessage: systemPrompt,
+            metadata: { source: 'telegram', ...metadata },
+        });
+
+        if (!result.success) {
+            console.error('Failed to process telegram image:', result.error);
+        } else {
+            console.log('[TELEGRAM] Image sent to Azure for analysis');
+        }
+    } catch (error) {
+        console.error('Error handling telegram image:', error);
+    }
+});
+
+// Listen for Telegram text message requests
+ipcRenderer.on('telegram-text-received', async (event, data) => {
+    try {
+        const { text, metadata } = data;
+
+        if (!text || text.trim().length === 0) {
+            console.error('No text data in telegram-text-received event');
+            return;
+        }
+
+        console.log(`\n[TELEGRAM] Text message received from Telegram`);
+        console.log(`[TELEGRAM]   Text: "${text}"`);
+        if (metadata?.userId) console.log(`[TELEGRAM]   From UserID: ${metadata.userId}`);
+        if (metadata?.timestamp) console.log(`[TELEGRAM]   Timestamp: ${new Date(metadata.timestamp * 1000).toISOString()}`);
+
+        // Use the existing send-text-message pipeline with automatic profile detection
+        // This will route through the same system as user-typed text input
+        const result = await ipcRenderer.invoke('send-text-message', text, null);
+
+        if (!result?.success) {
+            console.error('Failed to process telegram text:', result?.error);
+        } else {
+            console.log('[TELEGRAM] Text sent for AI analysis');
+        }
+    } catch (error) {
+        console.error('Error handling telegram text:', error);
+    }
+});
+
 // Handle shortcuts based on current view
 function handleShortcut(shortcutKey) {
     const currentView = hintio.getCurrentView();
+
+    if (shortcutKey === 'dual-screenshot') {
+        if (currentView !== 'main') {
+            captureDualScreenshot();
+        }
+        return;
+    }
+
+    if (shortcutKey === 'dual-screenshot-finish') {
+        if (currentView !== 'main') {
+            finishDualScreenshotBatch();
+        }
+        return;
+    }
+
+    if (shortcutKey === 'debug-screenshot') {
+        if (currentView !== 'main') {
+            captureDebugScreenshot();
+        }
+        return;
+    }
 
     if (shortcutKey === 'ctrl+enter' || shortcutKey === 'cmd+enter') {
         if (currentView === 'main') {
@@ -1017,6 +1372,32 @@ function handleShortcut(shortcutKey) {
         if (typeof hintio.repositionWindow === 'function') {
             hintio.repositionWindow('default');
         }
+        return;
+    }
+
+    if (shortcutKey === 'focus-text-input') {
+        if (currentView === 'assistant') {
+            const assistantView = document.querySelector('assistant-view');
+            if (assistantView && typeof assistantView.toggleInputExpanded === 'function') {
+                assistantView.toggleInputExpanded();
+                console.log('Input expanded via keyboard shortcut');
+            }
+        }
+        return;
+    }
+
+    if (shortcutKey === 'submit-text-input') {
+        if (currentView === 'assistant') {
+            const assistantView = document.querySelector('assistant-view');
+            if (assistantView && typeof assistantView.handleSendText === 'function') {
+                assistantView.handleSendText();
+                if (typeof assistantView.closeInputExpanded === 'function') {
+                    assistantView.closeInputExpanded();
+                }
+                console.log('Text submitted and input collapsed via keyboard shortcut');
+            }
+        }
+        return;
     }
 }
 

@@ -1,6 +1,45 @@
 import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
 
 export class ResizeHandles extends LitElement {
+  constructor() {
+    super();
+    this._activeEdge = null;
+    this._onPointerMove = this._onPointerMove.bind(this);
+    this._onPointerUp = this._onPointerUp.bind(this);
+  }
+
+  _startResize(edge, event) {
+    if (event.button !== 0 || !window.require) return;
+    const { ipcRenderer } = window.require('electron');
+    this._activeEdge = edge;
+    ipcRenderer.send('window-manual-resize-start', {
+      edge,
+      startX: event.screenX,
+      startY: event.screenY,
+    });
+    window.addEventListener('pointermove', this._onPointerMove);
+    window.addEventListener('pointerup', this._onPointerUp, { once: true });
+  }
+
+  _onPointerMove(event) {
+    if (!this._activeEdge || !window.require) return;
+    const { ipcRenderer } = window.require('electron');
+    ipcRenderer.send('window-manual-resize-step', {
+      edge: this._activeEdge,
+      dx: event.screenX,
+      dy: event.screenY,
+    });
+  }
+
+  _onPointerUp() {
+    if (window.require) {
+      const { ipcRenderer } = window.require('electron');
+      ipcRenderer.send('window-manual-resize-end');
+    }
+    this._activeEdge = null;
+    window.removeEventListener('pointermove', this._onPointerMove);
+  }
+
   static styles = css`
     :host {
       position: fixed;
@@ -51,14 +90,14 @@ export class ResizeHandles extends LitElement {
 
   render() {
     return html`
-      <div class="handle handle-h handle-t"></div>
-      <div class="handle handle-h handle-b"></div>
-      <div class="handle handle-v handle-l"></div>
-      <div class="handle handle-v handle-r"></div>
-      <div class="handle handle-corner handle-tl"></div>
-      <div class="handle handle-corner handle-tr"></div>
-      <div class="handle handle-corner handle-bl"></div>
-      <div class="handle handle-corner handle-br"></div>
+      <div class="handle handle-h handle-t" @pointerdown=${(e) => this._startResize('t', e)}></div>
+      <div class="handle handle-h handle-b" @pointerdown=${(e) => this._startResize('b', e)}></div>
+      <div class="handle handle-v handle-l" @pointerdown=${(e) => this._startResize('l', e)}></div>
+      <div class="handle handle-v handle-r" @pointerdown=${(e) => this._startResize('r', e)}></div>
+      <div class="handle handle-corner handle-tl" @pointerdown=${(e) => this._startResize('tl', e)}></div>
+      <div class="handle handle-corner handle-tr" @pointerdown=${(e) => this._startResize('tr', e)}></div>
+      <div class="handle handle-corner handle-bl" @pointerdown=${(e) => this._startResize('bl', e)}></div>
+      <div class="handle handle-corner handle-br" @pointerdown=${(e) => this._startResize('br', e)}></div>
     `;
   }
 }

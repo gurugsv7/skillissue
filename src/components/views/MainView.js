@@ -362,7 +362,7 @@ export class MainView extends LitElement {
     triggerApiKeyError(message = 'Access token is invalid or expired.') {
         this._tokenErrorMessage = message;
         const normalized = String(message || '').toLowerCase();
-        this._showUpgradeDialog = normalized.includes('invalid') || normalized.includes('expired');
+        this._showUpgradeDialog = normalized.includes('usage limit reached') || normalized.includes('interviews used') || normalized.includes('exhausted');
         this.requestUpdate();
     }
 

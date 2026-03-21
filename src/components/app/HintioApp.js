@@ -458,6 +458,7 @@ export class HintioApp extends LitElement {
         _updateAvailable: { state: true },
         _whisperDownloading: { state: true },
         _awaitingScreenAnalysis: { state: true },
+        _screenAnalysisMode: { state: true },
         _errorContent: { state: true },
         _hasVoiceProfile: { state: true },
         _calibrationSkipped: { state: true },
@@ -488,6 +489,7 @@ export class HintioApp extends LitElement {
         this._whisperDownloading = false;
         this._localVersion = '';
         this._awaitingScreenAnalysis = false;
+        this._screenAnalysisMode = '';
         this._errorContent = '';
         this._hasVoiceProfile = false;
         this._calibrationSkipped = false;
@@ -559,7 +561,9 @@ export class HintioApp extends LitElement {
             ipcRenderer.on('whisper-downloading', (_, downloading) => { this._whisperDownloading = downloading; });
             ipcRenderer.on('screen-analysis-triggered', () => {
                 this._awaitingScreenAnalysis = true;
+                this._screenAnalysisMode = 'manual';
                 this._layoutRepositioned = false;
+                this._errorContent = '';
             });
         }
     }
@@ -651,12 +655,18 @@ export class HintioApp extends LitElement {
         }
         cleaned = cleaned.replace(/\n?===LAYOUT:[a-z-]+===\n?/gi, '');
 
-        // Always strip code-issue markers; only store the content during analysis.
+        // For debug screenshot mode, keep code-issue details inline so no popup click is required.
+        // For all other modes, strip marker blocks from visible text.
+        const issueRegex = /\n?===CODE_ISSUE_START===\n?([\s\S]*?)\n?===CODE_ISSUE_END===\n?/gi;
         const issueMatch = cleaned.match(/===CODE_ISSUE_START===\n?([\s\S]*?)\n?===CODE_ISSUE_END===/i);
-        if (issueMatch && this._awaitingScreenAnalysis) {
-            this._errorContent = issueMatch[1].trim();
+        const isDebugAnalysis = this._screenAnalysisMode === 'debug';
+        if (issueMatch && isDebugAnalysis) {
+            const issueText = issueMatch[1].trim();
+            this._errorContent = issueText;
+            cleaned = cleaned.replace(issueRegex, `\n\nDebug Fix Details:\n${issueText}\n\n`);
+        } else {
+            cleaned = cleaned.replace(issueRegex, '');
         }
-        cleaned = cleaned.replace(/\n?===CODE_ISSUE_START===\n?[\s\S]*?\n?===CODE_ISSUE_END===\n?/gi, '');
 
         // Once status goes to Listening/Ready, analysis is done
         if (this._awaitingScreenAnalysis && (this.statusText?.includes('Listening') || this.statusText?.includes('Ready'))) {
@@ -780,6 +790,10 @@ export class HintioApp extends LitElement {
     }
 
     async _startSession() {
+        this._awaitingScreenAnalysis = false;
+        this._screenAnalysisMode = '';
+        this._errorContent = '';
+
         const creds = await hintio.storage.getCredentials();
         const accessToken = (creds.cloudToken || '').trim();
         if (!accessToken) {
@@ -861,6 +875,9 @@ export class HintioApp extends LitElement {
     }
 
     async handleSendText(message) {
+        this._awaitingScreenAnalysis = false;
+        this._screenAnalysisMode = '';
+
         const result = await window.hintio.sendTextMessage(message);
         if (!result.success) {
             this.setStatus('Error sending message: ' + result.error);
@@ -980,6 +997,7 @@ export class HintioApp extends LitElement {
                         }}
                         @screen-analysis-triggered=${() => {
                             this._awaitingScreenAnalysis = true;
+                            this._screenAnalysisMode = 'manual';
                             this._layoutRepositioned = false;
                             this._errorContent = '';
                         }}

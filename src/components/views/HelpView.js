@@ -19,44 +19,6 @@ export class HelpView extends LitElement {
                 justify-content: center;
             }
 
-            /* ── Quick link cards ── */
-            .link-grid {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: var(--space-sm);
-            }
-
-            .link-card {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                gap: 8px;
-                padding: 16px 12px;
-                border: 1px solid var(--border);
-                border-radius: var(--radius-md);
-                background: var(--bg-elevated);
-                cursor: pointer;
-                text-decoration: none;
-                transition: border-color var(--transition), background var(--transition), transform var(--transition);
-                color: var(--text-secondary);
-                font-size: var(--font-size-sm);
-                font-weight: 500;
-                text-align: center;
-            }
-
-            .link-card:hover {
-                border-color: #6366F1;
-                background: rgba(99, 102, 241, 0.08);
-                color: var(--text-primary);
-                transform: translateY(-1px);
-            }
-
-            .link-card .icon {
-                font-size: 22px;
-                color: #6366F1;
-                font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-            }
-
             /* ── Shortcuts ── */
             .shortcut-grid {
                 display: grid;
@@ -155,7 +117,7 @@ export class HelpView extends LitElement {
             }
 
             @media (max-width: 480px) {
-                .shortcut-grid, .tips-grid, .link-grid {
+                .shortcut-grid, .tips-grid {
                     grid-template-columns: 1fr;
                 }
             }
@@ -163,13 +125,11 @@ export class HelpView extends LitElement {
     ];
 
     static properties = {
-        onExternalLinkClick: { type: Function },
         keybinds: { type: Object },
     };
 
     constructor() {
         super();
-        this.onExternalLinkClick = () => {};
         this.keybinds = this.getDefaultKeybinds();
         this._loadKeybinds();
     }
@@ -196,6 +156,9 @@ export class HelpView extends LitElement {
             toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
             toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
             nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
+            dualScreenshot: isMac ? 'Cmd+Shift+Enter' : 'Ctrl+Shift+Enter',
+            dualScreenshotFinish: isMac ? 'Cmd+Shift+F' : 'Ctrl+Shift+F',
+            debugScreenshot: isMac ? 'Cmd+Shift+D' : 'Ctrl+Shift+D',
             previousResponse: isMac ? 'Cmd+[' : 'Ctrl+[',
             nextResponse: isMac ? 'Cmd+]' : 'Ctrl+]',
             scrollUp: isMac ? 'Cmd+Shift+Up' : 'Ctrl+Shift+Up',
@@ -207,10 +170,6 @@ export class HelpView extends LitElement {
         return keybind.split('+').map(key => html`<span class="key">${key}</span>`);
     }
 
-    _open(url) {
-        this.onExternalLinkClick(url);
-    }
-
     render() {
         const shortcutRows = [
             ['Move Up', this.keybinds.moveUp],
@@ -220,6 +179,9 @@ export class HelpView extends LitElement {
             ['Toggle Visibility', this.keybinds.toggleVisibility],
             ['Click-through', this.keybinds.toggleClickThrough],
             ['Next Step', this.keybinds.nextStep],
+            ['Multi Screenshot Answer (Max 3)', this.keybinds.dualScreenshot],
+            ['Finish Multi Screenshot Batch', this.keybinds.dualScreenshotFinish],
+            ['Debug Failed Test Screenshot', this.keybinds.debugScreenshot],
             ['Prev Response', this.keybinds.previousResponse],
             ['Next Response', this.keybinds.nextResponse],
             ['Scroll Up', this.keybinds.scrollUp],
@@ -237,28 +199,6 @@ export class HelpView extends LitElement {
             <div class="unified-page">
                 <div class="unified-wrap">
                     <div class="page-title">Help & Documentation</div>
-
-                    <!-- Quick links -->
-                    <section class="surface">
-                        <div class="surface-header">
-                            <span class="icon" style="font-size:16px;color:#6366F1">link</span>
-                            <div class="surface-title">Resources</div>
-                        </div>
-                        <div class="link-grid">
-                            <button class="link-card" @click=${() => this._open('https://hintio.com')}>
-                                <span class="icon">language</span>
-                                Website
-                            </button>
-                            <button class="link-card" @click=${() => this._open('https://github.com/sohzm/hintio')}>
-                                <span class="icon">code</span>
-                                GitHub
-                            </button>
-                            <button class="link-card" @click=${() => this._open('https://discord.gg/GCBdubnXfJ')}>
-                                <span class="icon">forum</span>
-                                Discord
-                            </button>
-                        </div>
-                    </section>
 
                     <!-- Tips -->
                     <section class="surface">
