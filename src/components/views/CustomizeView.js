@@ -286,6 +286,7 @@ export class CustomizeView extends LitElement {
     getProfiles() {
         return [
             { value: 'interview', name: 'Job Interview' },
+            { value: 'frontend-interview', name: 'Frontend Technical Interview' },
             { value: 'sales', name: 'Sales Call' },
             { value: 'meeting', name: 'Business Meeting' },
             { value: 'presentation', name: 'Presentation' },

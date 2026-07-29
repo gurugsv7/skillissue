@@ -11,6 +11,8 @@ import { FeedbackView } from '../views/FeedbackView.js';
 import { CalibrationView } from '../views/CalibrationView.js';
 
 export class HintioApp extends LitElement {
+    static DEFAULT_SESSION_LIMIT_MS = 15 * 60 * 1000;
+
     static styles = css`
         * {
             box-sizing: border-box;
@@ -379,6 +381,10 @@ export class HintioApp extends LitElement {
             color: var(--accent);
         }
 
+        .live-bar-text.warn {
+            color: var(--warning);
+        }
+
         .live-bar-text.clickable {
             cursor: pointer;
             border: 1px solid var(--border);
@@ -462,6 +468,7 @@ export class HintioApp extends LitElement {
         _errorContent: { state: true },
         _hasVoiceProfile: { state: true },
         _calibrationSkipped: { state: true },
+        sessionLimitMs: { state: true },
     };
 
     constructor() {
@@ -494,6 +501,8 @@ export class HintioApp extends LitElement {
         this._hasVoiceProfile = false;
         this._calibrationSkipped = false;
         this._layoutRepositioned = false;
+        this._sessionTimeoutHandled = false;
+        this.sessionLimitMs = null;
 
         this._loadFromStorage();
         this._checkForUpdates();
@@ -587,8 +596,23 @@ export class HintioApp extends LitElement {
     _startTimer() {
         this._stopTimer();
         if (this.startTime) {
-            this._timerInterval = setInterval(() => this.requestUpdate(), 1000);
+            this._timerInterval = setInterval(() => {
+                if (this.currentView === 'assistant' && this._isSessionTimedOut()) {
+                    this._handleSessionTimeout().catch((error) => {
+                        console.error('Session timeout handling failed:', error);
+                    });
+                    return;
+                }
+                this.requestUpdate();
+            }, 1000);
         }
+    }
+
+    _getActiveSessionLimitMs() {
+        if (typeof this.sessionLimitMs === 'number' && Number.isFinite(this.sessionLimitMs) && this.sessionLimitMs > 0) {
+            return this.sessionLimitMs;
+        }
+        return null;
     }
 
     _stopTimer() {
@@ -607,6 +631,26 @@ export class HintioApp extends LitElement {
         const pad = n => String(n).padStart(2, '0');
         if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
         return `${m}:${pad(s)}`;
+    }
+
+    getRemainingSessionTime() {
+        const sessionLimitMs = this._getActiveSessionLimitMs();
+        if (!sessionLimitMs) return '';
+
+        const remainingMs = this.startTime
+            ? Math.max(0, sessionLimitMs - (Date.now() - this.startTime))
+            : sessionLimitMs;
+        const remainingSeconds = Math.floor(remainingMs / 1000);
+        const minutes = Math.floor(remainingSeconds / 60);
+        const seconds = remainingSeconds % 60;
+        return `${minutes}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    isSessionNearTimeout() {
+        const sessionLimitMs = this._getActiveSessionLimitMs();
+        if (!this.startTime || !sessionLimitMs) return false;
+        const remainingMs = sessionLimitMs - (Date.now() - this.startTime);
+        return remainingMs > 0 && remainingMs <= 60_000;
     }
 
     // ── Status & Responses ──
@@ -678,6 +722,47 @@ export class HintioApp extends LitElement {
 
     // ── Navigation ──
 
+    _isSessionTimedOut() {
+        const sessionLimitMs = this._getActiveSessionLimitMs();
+        if (!sessionLimitMs) return false;
+        return Boolean(this.startTime) && Date.now() - this.startTime >= sessionLimitMs;
+    }
+
+    async _endSessionToHome() {
+        hintio.stopCapture();
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            await ipcRenderer.invoke('close-session');
+        }
+        if (window.hintio?.clearSessionProviderSecrets) {
+            await window.hintio.clearSessionProviderSecrets();
+        }
+        this.sessionActive = false;
+        this.startTime = null;
+        this.sessionLimitMs = null;
+        this._awaitingScreenAnalysis = false;
+        this._screenAnalysisMode = '';
+        this._errorContent = '';
+        this._stopTimer();
+        this.currentView = 'main';
+        this.requestUpdate();
+    }
+
+    async _handleSessionTimeout() {
+        if (this._sessionTimeoutHandled || this.currentView !== 'assistant') {
+            return;
+        }
+        this._sessionTimeoutHandled = true;
+        const sessionLimitMs = this._getActiveSessionLimitMs();
+        const sessionLimitMinutes = sessionLimitMs ? Math.round(sessionLimitMs / 60000) : 15;
+        this.setStatus(`Session timed out after ${sessionLimitMinutes} minutes. Returning to home.`);
+        try {
+            await this._endSessionToHome();
+        } finally {
+            this._sessionTimeoutHandled = false;
+        }
+    }
+
     navigate(view) {
         this.currentView = view;
         this.requestUpdate();
@@ -685,17 +770,7 @@ export class HintioApp extends LitElement {
 
     async handleClose() {
         if (this.currentView === 'assistant') {
-            hintio.stopCapture();
-            if (window.require) {
-                const { ipcRenderer } = window.require('electron');
-                await ipcRenderer.invoke('close-session');
-            }
-            if (window.hintio?.clearSessionProviderSecrets) {
-                await window.hintio.clearSessionProviderSecrets();
-            }
-            this.sessionActive = false;
-            this._stopTimer();
-            this.currentView = 'main';
+            await this._endSessionToHome();
         } else if (this.currentView === 'calibration') {
             // Go back to main from calibration
             this.currentView = 'main';
@@ -812,6 +887,10 @@ export class HintioApp extends LitElement {
         this.responses = [];
         this.currentResponseIndex = -1;
         this.startTime = Date.now();
+        this.sessionLimitMs = (typeof hintio.getSessionLimitMs === 'function')
+            ? (hintio.getSessionLimitMs() ?? null)
+            : HintioApp.DEFAULT_SESSION_LIMIT_MS;
+        this._sessionTimeoutHandled = false;
         this.sessionActive = true;
         this.currentView = 'assistant';
         this._startTimer();
@@ -875,6 +954,11 @@ export class HintioApp extends LitElement {
     }
 
     async handleSendText(message) {
+        if (this.currentView === 'assistant' && this._isSessionTimedOut()) {
+            await this._handleSessionTimeout();
+            return;
+        }
+
         this._awaitingScreenAnalysis = false;
         this._screenAnalysisMode = '';
 
@@ -1084,6 +1168,9 @@ export class HintioApp extends LitElement {
 
     renderLiveBar() {
         if (!this._isLiveMode()) return '';
+        const remainingSessionTime = this.getRemainingSessionTime();
+        const remainingTimeClass = this.isSessionNearTimeout() ? 'warn' : '';
+        const hasSessionLimit = Boolean(this._getActiveSessionLimitMs());
 
         const profileLabels = {
             interview: 'Interview',
@@ -1108,6 +1195,7 @@ export class HintioApp extends LitElement {
                 </div>
                 <div class="live-bar-right">
                     ${this.statusText ? html`<span class="live-bar-text hot">${this.statusText}</span>` : ''}
+                    ${hasSessionLimit ? html`<span class="live-bar-text ${remainingTimeClass}">Left ${remainingSessionTime}</span>` : ''}
                     <span class="live-bar-text">${this.getElapsedTime()}</span>
                     ${this._isClickThrough ? html`<span class="live-bar-text">[pass-thru]</span>` : ''}
                     <span class="live-bar-text clickable" @click=${() => this.handleHideToggle()}>[hide]</span>

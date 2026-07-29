@@ -1,5 +1,8 @@
 // renderer.js
 const { ipcRenderer } = require('electron');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 let mediaStream = null;
 let screenshotInterval = null;
@@ -18,6 +21,95 @@ let currentImageQuality = 'medium'; // Store current image quality for manual sc
 let pendingDualScreenshotBase64List = [];
 let dualScreenshotTimeoutHandle = null;
 let dualScreenshotRequestInFlight = false;
+let pendingTelegramImagesBuffer = [];
+let telegramImageTimeoutHandle = null;
+let telegramImageRequestInFlight = false;
+const TELEGRAM_IMAGE_COLLECTION_WAIT_MS = 500; // Wait 500ms for additional images
+const TELEGRAM_MULTI_IMAGE_PROMPT_PREFIX = `You are receiving MULTIPLE images from Telegram (same question sent as separate images).
+Treat all images as a single combined context and answer based on the complete question across images.
+If text/content is split across images, merge it logically before answering.
+
+`;
+
+// ============ TELEGRAM DEBUG ERROR DETECTION ============
+/**
+ * Analyze base64 image for error indicators
+ * Returns: { hasError: boolean, confidence: number 0-1, indicators: Array }
+ */
+function detectErrorIndicatorsInImage(base64String) {
+    try {
+        // Decode first chunk to analyze
+        const buffer = Buffer.from(base64String.slice(0, 10000), 'base64');
+        
+        // Look for red color indicators in JPEG (rough heuristic based on JPEG structure)
+        // This is a simple heuristic - red components often dominate in error screenshots
+        const redIndicators = [];
+        
+        // Check for common error keywords that might appear in JPEG metadata or text regions
+        // (Note: Full JPEG analysis would require actual image parsing library)
+        // For now, we'll use a simpler heuristic based on image characteristics
+        
+        // Indicator 1: JPEG file size - error screenshots often have certain characteristics
+        const sizeKB = base64String.length / 1024;
+        if (sizeKB < 20) {
+            // Very small images might be error messages or focused error areas
+            redIndicators.push('small_file_size');
+        }
+        
+        // Indicator 2: Check if first few bytes match JPEG header
+        if (!base64String.startsWith('/9j/')) {
+            redIndicators.push('not_valid_jpeg');
+        }
+        
+        // Conservative approach: if we detect any indicators, flag it for manual review
+        // In production, you'd use vision-based analysis or ML model
+        const hasError = redIndicators.length > 0;
+        const confidence = redIndicators.length === 0 ? 0 : 0.3; // Low confidence for now
+        
+        console.log(`[TELEGRAM DEBUG] Error analysis - indicators: ${JSON.stringify(redIndicators)}, confidence: ${confidence}`);
+        
+        return {
+            hasError: hasError,
+            confidence: confidence,
+            indicators: redIndicators,
+        };
+    } catch (error) {
+        console.error('[TELEGRAM DEBUG] Error analyzing image:', error);
+        return { hasError: false, confidence: 0, indicators: ['analysis_error'] };
+    }
+}
+
+/**
+ * Send Telegram image in debug mode with previous code context
+ */
+async function sendTelegramImageInDebugMode(base64, caption, metadata) {
+    if (telegramImageRequestInFlight) return;
+    
+    console.log('[TELEGRAM DEBUG] Activating debug mode for error analysis');
+    telegramImageRequestInFlight = true;
+
+    try {
+        const previousCodeContext = buildPreviousCodeContext();
+        const debugPrompt = `${DEBUG_SCREENSHOT_PROMPT}${previousCodeContext}`;
+        
+        hintio.setStatus('Analyzing error in debug mode...');
+
+        const result = await ipcRenderer.invoke('send-image-content', {
+            images: [base64],
+            prompt: debugPrompt,
+            metadata: { source: 'telegram', mode: 'debug', ...metadata },
+        });
+
+        if (result.success) {
+            console.log('[TELEGRAM DEBUG] Debug analysis completed');
+        } else {
+            console.error('[TELEGRAM DEBUG] Failed to analyze:', result.error);
+            hintio.addNewResponse(`Debug Error: ${result.error}`);
+        }
+    } finally {
+        telegramImageRequestInFlight = false;
+    }
+}
 let providerSecretsCache = null;
 let providerSecretsToken = '';
 let providerSecretsResolvedAt = 0;
@@ -25,6 +117,7 @@ const PROVIDER_SECRETS_CACHE_TTL_MS = 30 * 60 * 1000;
 const DUAL_SCREENSHOT_WAIT_MS = 20000;
 const MAX_DUAL_SCREENSHOT_IMAGES = 3;
 let lastInitErrorMessage = '';
+let currentSessionLimitMs = null;
 
 const isLinux = process.platform === 'linux';
 const isMacOS = process.platform === 'darwin';
@@ -210,6 +303,21 @@ function buildCombinedContext(prefs) {
     return custom;
 }
 
+function deriveSessionLimitMs(providerSecrets = {}) {
+    const metadata = (providerSecrets && typeof providerSecrets.metadata === 'object') ? providerSecrets.metadata : {};
+    const metadataLimit = Number(metadata.sessionTimeoutMs ?? metadata.session_timeout_ms ?? metadata.sessionLimitMs ?? 0);
+    if (Number.isFinite(metadataLimit) && metadataLimit > 0) {
+        return Math.floor(metadataLimit);
+    }
+
+    const maxInterviews = Number(providerSecrets.maxInterviews || 0);
+    if (maxInterviews === 3) {
+        return 15 * 60 * 1000;
+    }
+
+    return null;
+}
+
 async function initializeAzure(profile = 'interview', language = 'en-US') {
     const accessToken = await storage.getAccessToken();
     if (!accessToken || !accessToken.trim()) {
@@ -220,10 +328,13 @@ async function initializeAzure(profile = 'interview', language = 'en-US') {
 
     const preflight = await getProviderSecrets(accessToken.trim(), { consume: false });
     if (!preflight?.success) {
+        currentSessionLimitMs = null;
         lastInitErrorMessage = parseAccessTokenErrorMessage(preflight?.error);
         hintio.setStatus(lastInitErrorMessage);
         return false;
     }
+
+    currentSessionLimitMs = deriveSessionLimitMs(preflight.data || {});
 
     const prefs = await storage.getPreferences();
     const initResult = await ipcRenderer.invoke('initialize-azure', accessToken.trim(), buildCombinedContext(prefs), profile, language);
@@ -285,6 +396,7 @@ async function clearSessionProviderSecrets() {
         await storage.clearProviderSecrets();
         await ipcRenderer.invoke('clear-runtime-provider-secrets').catch(() => ({ success: false }));
         lastInitErrorMessage = '';
+        currentSessionLimitMs = null;
         return { success: true };
     } catch (error) {
         console.error('Error clearing session provider secrets:', error);
@@ -315,6 +427,7 @@ async function getProviderSecrets(accessToken = null, options = {}) {
         providerSecretsCache = resolved.data;
         providerSecretsToken = token;
         providerSecretsResolvedAt = now;
+        currentSessionLimitMs = deriveSessionLimitMs(resolved.data);
     }
 
     return resolved;
@@ -901,6 +1014,130 @@ async function sendPendingDualScreenshots(trigger = 'manual') {
     }
 }
 
+// ============ TELEGRAM MULTI-IMAGE HANDLING ============
+function clearPendingTelegramImageState() {
+    if (telegramImageTimeoutHandle) {
+        clearTimeout(telegramImageTimeoutHandle);
+        telegramImageTimeoutHandle = null;
+    }
+    pendingTelegramImagesBuffer = [];
+}
+
+function armTelegramImageTimeout() {
+    if (telegramImageTimeoutHandle) {
+        clearTimeout(telegramImageTimeoutHandle);
+    }
+    telegramImageTimeoutHandle = setTimeout(async () => {
+        if (!pendingTelegramImagesBuffer.length || telegramImageRequestInFlight) {
+            return;
+        }
+
+        // Send buffered images (even if only 1)
+        if (pendingTelegramImagesBuffer.length >= 1) {
+            await sendPendingTelegramImages('batch');
+            return;
+        }
+
+        clearPendingTelegramImageState();
+    }, TELEGRAM_IMAGE_COLLECTION_WAIT_MS);
+}
+
+async function sendPendingTelegramImages(trigger = 'manual') {
+    if (telegramImageRequestInFlight) return;
+    if (pendingTelegramImagesBuffer.length < 1) return;
+
+    const imagesToSend = pendingTelegramImagesBuffer.map(img => img.base64);
+    const allPrompts = pendingTelegramImagesBuffer.map(img => img.caption).filter(p => p);
+    const allMetadata = pendingTelegramImagesBuffer.map(img => img.metadata);
+    
+    clearPendingTelegramImageState();
+
+    // ============ ERROR DETECTION + AUTO-DEBUG ============
+    console.log('[TELEGRAM DEBUG] Running error detection on buffered images...');
+    let detectedErrorInBatch = false;
+    let errorImageIndex = -1;
+    
+    for (let i = 0; i < imagesToSend.length; i++) {
+        const analysis = detectErrorIndicatorsInImage(imagesToSend[i]);
+        if (analysis.hasError && analysis.confidence > 0.2) {
+            detectedErrorInBatch = true;
+            errorImageIndex = i;
+            console.log(`[TELEGRAM DEBUG] 🔴 ERROR DETECTED in image ${i + 1}: ${JSON.stringify(analysis.indicators)}`);
+            break; // Use first error image for debug mode
+        }
+    }
+
+    // If error detected, send in debug mode instead of regular prompt
+    if (detectedErrorInBatch && errorImageIndex >= 0) {
+        console.log(`[TELEGRAM DEBUG] 🔴 AUTO-ACTIVATING DEBUG MODE for image ${errorImageIndex + 1}/${imagesToSend.length}`);
+        
+        if (telegramImageRequestInFlight) return;
+        telegramImageRequestInFlight = true;
+
+        try {
+            const previousCodeContext = buildPreviousCodeContext();
+            const debugPrompt = `${DEBUG_SCREENSHOT_PROMPT}${previousCodeContext}`;
+            
+            hintio.setStatus('🔴 DEBUG MODE: Analyzing error in Telegram image...');
+            console.log('[TELEGRAM DEBUG] Sending with DEBUG_SCREENSHOT_PROMPT + previous code context');
+
+            const result = await ipcRenderer.invoke('send-image-content', {
+                images: [imagesToSend[errorImageIndex]],
+                prompt: debugPrompt,
+                metadata: { 
+                    source: 'telegram',
+                    mode: 'debug',
+                    errorDetectedAt: errorImageIndex,
+                    totalImages: imagesToSend.length,
+                    ...allMetadata[errorImageIndex]
+                },
+            });
+
+            if (result.success) {
+                console.log('[TELEGRAM DEBUG] 🟢 Error analysis completed - debug context applied');
+            } else {
+                console.error('[TELEGRAM DEBUG] Failed:', result.error);
+                hintio.addNewResponse(`Debug Error: ${result.error}`);
+            }
+        } finally {
+            telegramImageRequestInFlight = false;
+        }
+        return;
+    }
+
+    // Normal flow: send all images together (no errors detected)
+    telegramImageRequestInFlight = true;
+
+    try {
+        // Combine prompts from multiple images
+        let combinedPrompt;
+        if (imagesToSend.length > 1) {
+            combinedPrompt = `${TELEGRAM_MULTI_IMAGE_PROMPT_PREFIX}Images in order:\n${allPrompts.map((p, i) => `${i + 1}. ${p}`).join('\n')}`;
+            hintio.setStatus(`Analyzing ${imagesToSend.length} Telegram images...`);
+            console.log(`[TELEGRAM BATCH] Processing ${imagesToSend.length} images together (no errors detected)`);
+        } else {
+            combinedPrompt = allPrompts[0] || 'Analyze this image and provide detailed insights.';
+            hintio.setStatus('Analyzing Telegram image...');
+            console.log(`[TELEGRAM] Processing single image (no errors detected)`);
+        }
+
+        const result = await ipcRenderer.invoke('send-image-content', {
+            images: imagesToSend,
+            prompt: combinedPrompt,
+            metadata: { source: 'telegram', batch: allMetadata },
+        });
+
+        if (result.success) {
+            console.log(`[TELEGRAM] ${trigger} multi-image response completed from ${result.model}`);
+        } else {
+            console.error('[TELEGRAM] Failed to get multi-image response:', result.error);
+            hintio.addNewResponse(`Error: ${result.error}`);
+        }
+    } finally {
+        telegramImageRequestInFlight = false;
+    }
+}
+
 async function captureFrameToBase64(imageQuality = null) {
     const quality = imageQuality || currentImageQuality;
 
@@ -994,20 +1231,9 @@ async function captureManualScreenshot(imageQuality = null) {
     markScreenAnalysisTriggered('manual');
 
     const base64data = await captureFrameToBase64(imageQuality);
-    if (!base64data) return;
-
-    try {
-        const saveResult = await ipcRenderer.invoke('save-debug-screenshot', {
-            base64: base64data,
-            mode: 'manual',
-        });
-        if (saveResult?.success && saveResult.filePath) {
-            console.log('Saved manual screenshot locally:', saveResult.filePath);
-        } else if (saveResult?.error) {
-            console.warn('Failed to save manual screenshot locally:', saveResult.error);
-        }
-    } catch (error) {
-        console.warn('Error invoking save-debug-screenshot:', error);
+    if (!base64data) {
+        hintio.setStatus('Screenshot capture failed');
+        return;
     }
 
     const result = await ipcRenderer.invoke('send-image-content', {
@@ -1239,33 +1465,20 @@ ipcRenderer.on('telegram-image-received', async (event, data) => {
         console.log(`\n[TELEGRAM] Image received from Telegram`);
         console.log(`[TELEGRAM]   Caption: "${caption}"`);
         console.log(`[TELEGRAM]   Image Size: ${(base64.length / 1024).toFixed(2)} KB`);
+        console.log(`[TELEGRAM]   First 30 chars of base64: "${base64.slice(0, 30)}"`);
         if (metadata?.userId) console.log(`[TELEGRAM]   From UserID: ${metadata.userId}`);
         if (metadata?.timestamp) console.log(`[TELEGRAM]   Timestamp: ${new Date(metadata.timestamp * 1000).toISOString()}`);
 
-        // Convert Base64 to image list format expected by send-image-content
-        const imageList = [
-            {
-                type: 'image_url',
-                image_url: {
-                    url: `data:image/jpeg;base64,${base64}`,
-                },
-            },
-        ];
-
-        const systemPrompt = caption || 'Analyze this image and provide detailed insights.';
-
-        // Use the existing send-image-content pipeline
-        const result = await ipcRenderer.invoke('send-image-content', {
-            imageList,
-            systemMessage: systemPrompt,
-            metadata: { source: 'telegram', ...metadata },
+        // Buffer this image and wait for more
+        pendingTelegramImagesBuffer.push({
+            base64: base64,
+            caption: caption || 'Image from Telegram',
+            metadata: metadata,
         });
 
-        if (!result.success) {
-            console.error('Failed to process telegram image:', result.error);
-        } else {
-            console.log('[TELEGRAM] Image sent to Azure for analysis');
-        }
+        console.log(`[TELEGRAM] Buffered image ${pendingTelegramImagesBuffer.length} - waiting ${TELEGRAM_IMAGE_COLLECTION_WAIT_MS}ms for more...`);
+        armTelegramImageTimeout();
+
     } catch (error) {
         console.error('Error handling telegram image:', error);
     }
@@ -1302,7 +1515,9 @@ ipcRenderer.on('telegram-text-received', async (event, data) => {
 
 // Handle shortcuts based on current view
 function handleShortcut(shortcutKey) {
+    console.log('[SHORTCUT] handleShortcut called with:', shortcutKey);
     const currentView = hintio.getCurrentView();
+    console.log('[SHORTCUT] currentView:', currentView);
 
     if (shortcutKey === 'dual-screenshot') {
         if (currentView !== 'main') {
@@ -1376,12 +1591,53 @@ function handleShortcut(shortcutKey) {
     }
 
     if (shortcutKey === 'focus-text-input') {
+        console.log('[FOCUS DEBUG] Shortcut triggered, currentView:', currentView);
+        
         if (currentView === 'assistant') {
+            console.log('[FOCUS DEBUG] View is assistant, finding element');
             const assistantView = document.querySelector('assistant-view');
-            if (assistantView && typeof assistantView.toggleInputExpanded === 'function') {
-                assistantView.toggleInputExpanded();
-                console.log('Input expanded via keyboard shortcut');
+            console.log('[FOCUS DEBUG] assistantView element found:', !!assistantView);
+            
+            if (assistantView) {
+                console.log('[FOCUS DEBUG] Current _inputExpanded state:', assistantView._inputExpanded);
+                
+                // Expand the input if not already expanded
+                if (!assistantView._inputExpanded) {
+                    console.log('[FOCUS DEBUG] Setting _inputExpanded to true');
+                    assistantView._inputExpanded = true;
+                    assistantView.requestUpdate();
+                } else {
+                    console.log('[FOCUS DEBUG] Input already expanded');
+                }
+                
+                // Wait for Lit to complete rendering before focusing
+                console.log('[FOCUS DEBUG] Waiting for updateComplete...');
+                assistantView.updateComplete.then(() => {
+                    console.log('[FOCUS DEBUG] updateComplete resolved');
+                    const textInput = assistantView.shadowRoot?.querySelector('#textInput');
+                    console.log('[FOCUS DEBUG] textInput found:', !!textInput);
+                    
+                    if (textInput) {
+                        console.log('[FOCUS DEBUG] Focusing and selecting input');
+                        textInput.focus();
+                        textInput.select();
+                        console.log('[FOCUS DEBUG] Text input focused and ready');
+                    } else {
+                        console.log('[FOCUS DEBUG] ERROR: textInput not found in shadowRoot');
+                        // Try without shadow root as fallback
+                        const fallbackInput = document.querySelector('#textInput');
+                        console.log('[FOCUS DEBUG] Fallback input found:', !!fallbackInput);
+                        if (fallbackInput) {
+                            fallbackInput.focus();
+                            fallbackInput.select();
+                        }
+                    }
+                }).catch(err => console.warn('[FOCUS DEBUG] updateComplete error:', err));
+            } else {
+                console.log('[FOCUS DEBUG] ERROR: assistantView element not found');
             }
+        } else {
+            console.log('[FOCUS DEBUG] ERROR: currentView is not "assistant", it is:', currentView);
         }
         return;
     }
@@ -1706,6 +1962,7 @@ const hintio = {
     stopCapture,
     sendTextMessage,
     getProviderSecrets,
+    getSessionLimitMs: () => currentSessionLimitMs,
     getLastInitError,
     clearSessionProviderSecrets,
     handleShortcut,

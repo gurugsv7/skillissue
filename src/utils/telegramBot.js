@@ -8,8 +8,27 @@ const path = require('path');
 let botToken = null;
 let botUserId = null;
 let ipcSendCallback = null;
-let pollingInterval = null;
+let pollingTimer = null;
+let pollingActive = false;
 let updateOffset = 0;
+let lastConflictWarningAt = 0;
+const TELEGRAM_CONFLICT_SUPPRESSION_MS = 5 * 60 * 1000;
+
+function logTelegramPollConflict(description) {
+    const message = String(description || '');
+    if (!message.includes('terminated by other getUpdates request')) {
+        console.error('[Telegram] Poll error:', message);
+        return;
+    }
+
+    const now = Date.now();
+    if (now - lastConflictWarningAt < TELEGRAM_CONFLICT_SUPPRESSION_MS) {
+        return;
+    }
+
+    lastConflictWarningAt = now;
+    console.warn('[Telegram] Poll conflict: another bot instance may already be polling updates.');
+}
 
 /**
  * Initialize Telegram bot
@@ -57,12 +76,12 @@ async function downloadTelegramFile(fileId) {
                     const filePath = json.result.file_path;
                     const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
 
-                    // Download file
+                    // Download file as buffer chunks
                     https.get(downloadUrl, fileRes => {
-                        let fileData = '';
-                        fileRes.on('data', chunk => { fileData += chunk; });
+                        const chunks = [];
+                        fileRes.on('data', chunk => { chunks.push(chunk); });
                         fileRes.on('end', () => {
-                            resolve(Buffer.from(fileData, 'binary'));
+                            resolve(Buffer.concat(chunks));
                         });
                     }).on('error', reject);
                 } catch (error) {
@@ -120,6 +139,14 @@ async function handleTelegramUpdate(update, onImageReceived = null, onTextReceiv
             const base64Photo = bufferToBase64(photoBuffer);
 
             const caption = message.caption || 'Image analysis from Telegram';
+
+            // Validate JPEG base64
+            const first20Chars = base64Photo.slice(0, 20);
+            if (!base64Photo.startsWith('/9j/')) {
+                console.error(`[Telegram] ⚠ Invalid JPEG base64! First 20 chars: "${first20Chars}", expected to start with "/9j/"`);
+            } else {
+                console.log(`[Telegram] ✓ Valid JPEG base64 - starts with "/9j/"`);
+            }
 
             // Trigger callback if provided
             if (onImageReceived) {
@@ -213,43 +240,49 @@ async function pollTelegramUpdates(onImageReceived = null, onTextReceived = null
         return;
     }
 
-    try {
-        const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${updateOffset}&timeout=5`;
+    return new Promise((resolve) => {
+        try {
+            const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${updateOffset}&timeout=5`;
 
-        https.get(url, res => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', async () => {
-                try {
-                    const json = JSON.parse(data);
-                    if (!json.ok) {
-                        console.error('[Telegram] Poll error:', json.description);
-                        return;
-                    }
-
-                    const updates = json.result || [];
-                    if (updates.length > 0) {
-                        console.log('[Telegram] Received', updates.length, 'update(s)');
-
-                        for (const update of updates) {
-                            await handleTelegramUpdate(update, onImageReceived, onTextReceived);
-                            updateOffset = Math.max(updateOffset, update.update_id + 1);
+            https.get(url, res => {
+                let data = '';
+                res.on('data', chunk => { data += chunk; });
+                res.on('end', async () => {
+                    try {
+                        const json = JSON.parse(data);
+                        if (!json.ok) {
+                            logTelegramPollConflict(json.description);
+                            resolve();
+                            return;
                         }
+
+                        const updates = json.result || [];
+                        if (updates.length > 0) {
+                            console.log('[Telegram] Received', updates.length, 'update(s)');
+
+                            for (const update of updates) {
+                                await handleTelegramUpdate(update, onImageReceived, onTextReceived);
+                                updateOffset = Math.max(updateOffset, update.update_id + 1);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('[Telegram] Poll parse error:', error.message);
                     }
-                } catch (error) {
-                    console.error('[Telegram] Poll parse error:', error.message);
-                }
+                    resolve();
+                });
+            }).on('error', error => {
+                console.error('[Telegram] Poll request error:', error.message);
+                resolve();
             });
-        }).on('error', error => {
-            console.error('[Telegram] Poll request error:', error.message);
-        });
-    } catch (error) {
-        console.error('[Telegram] Poll error:', error.message);
-    }
+        } catch (error) {
+            console.error('[Telegram] Poll error:', error.message);
+            resolve();
+        }
+    });
 }
 
 /**
- * Start polling for Telegram updates
+ * Start polling for Telegram updates (recursive)
  * @param {number} pollIntervalMs - Polling interval in milliseconds (default 2000)
  * @param {Function} onImageReceived - Callback for images
  * @param {Function} onTextReceived - Callback for text
@@ -260,19 +293,27 @@ function startPolling(pollIntervalMs = 2000, onImageReceived = null, onTextRecei
         return false;
     }
 
-    if (pollingInterval) {
+    if (pollingActive) {
         console.log('[Telegram] Polling already running');
         return false;
     }
 
-    console.log(`[Telegram] ✓ Starting polling with ${pollIntervalMs}ms interval`);
+    console.log(`[Telegram] ✓ Starting polling with ${pollIntervalMs}ms delay between requests`);
 
-    pollingInterval = setInterval(() => {
-        pollTelegramUpdates(onImageReceived, onTextReceived);
-    }, pollIntervalMs);
+    // Use recursive approach to prevent overlapping requests
+    // The timeout=5 in getUpdates means the connection holds for 5 seconds
+    // So we add delay AFTER the request completes to avoid conflicts
+    const recursivePoll = async () => {
+        if (!pollingActive) return; // Stop if polling was stopped
+        
+        await pollTelegramUpdates(onImageReceived, onTextReceived);
+        
+        // Schedule next poll after previous completes
+        pollingTimer = setTimeout(recursivePoll, pollIntervalMs);
+    };
 
-    // Initial poll
-    pollTelegramUpdates(onImageReceived, onTextReceived);
+    pollingActive = true;
+    recursivePoll();
 
     return true;
 }
@@ -281,9 +322,12 @@ function startPolling(pollIntervalMs = 2000, onImageReceived = null, onTextRecei
  * Stop polling for Telegram updates
  */
 function stopPolling() {
-    if (pollingInterval) {
-        clearInterval(pollingInterval);
-        pollingInterval = null;
+    if (pollingActive) {
+        pollingActive = false;
+        if (pollingTimer) {
+            clearTimeout(pollingTimer);
+            pollingTimer = null;
+        }
         console.log('[Telegram] Polling stopped');
         return true;
     }

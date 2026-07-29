@@ -1,6 +1,7 @@
 const { Ollama } = require('ollama');
 const { getSystemPrompt } = require('./prompts');
 const { sendToRenderer, initializeNewSession, saveConversationTurn } = require('./providerRuntime');
+const { formatSpokenInterviewAnswer } = require('./answerFormatting');
 
 // ── State ──
 
@@ -10,6 +11,7 @@ let whisperPipeline = null;
 let isWhisperLoading = false;
 let localConversationHistory = [];
 let currentSystemPrompt = null;
+let currentProfile = null;
 let isLocalActive = false;
 
 // VAD state
@@ -247,18 +249,20 @@ async function sendToOllama(transcription) {
             const token = part.message?.content || '';
             if (token) {
                 fullText += token;
-                sendToRenderer(isFirst ? 'new-response' : 'update-response', fullText);
+                const displayText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
                 isFirst = false;
             }
         }
 
         if (fullText.trim()) {
+            const savedText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
             localConversationHistory.push({
                 role: 'assistant',
-                content: fullText.trim(),
+                content: savedText.trim(),
             });
 
-            saveConversationTurn(transcription, fullText);
+            saveConversationTurn(transcription, savedText);
         }
 
         console.log('[LocalAI] Ollama response completed');
@@ -281,6 +285,7 @@ async function initializeLocalSession(ollamaHost, model, whisperModel, profile, 
         // Load voice profile for style adaptation
         const { getVoiceProfile } = require('../storage');
         const voiceProfile = getVoiceProfile();
+        currentProfile = profile;
         currentSystemPrompt = getSystemPrompt(profile, customPrompt, false, voiceProfile);
 
         // Initialize Ollama client
@@ -352,6 +357,7 @@ function closeLocalSession() {
     ollamaClient = null;
     ollamaModel = null;
     currentSystemPrompt = null;
+    currentProfile = null;
     // Note: whisperPipeline is kept loaded to avoid reloading on next session
 }
 
@@ -428,14 +434,16 @@ async function sendLocalImage(base64Data, prompt) {
             const token = part.message?.content || '';
             if (token) {
                 fullText += token;
-                sendToRenderer(isFirst ? 'new-response' : 'update-response', fullText);
+                const displayText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
                 isFirst = false;
             }
         }
 
         if (fullText.trim()) {
-            localConversationHistory.push({ role: 'assistant', content: fullText.trim() });
-            saveConversationTurn(prompt, fullText);
+            const savedText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+            localConversationHistory.push({ role: 'assistant', content: savedText.trim() });
+            saveConversationTurn(prompt, savedText);
         }
 
         console.log('[LocalAI] Image response completed');

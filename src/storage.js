@@ -310,7 +310,7 @@ function sanitizeKeybinds(keybinds) {
     if (keybinds === null) return null;
     ensurePlainObject(keybinds, 'keybinds');
     const sanitized = {};
-    const acceleratorRegex = /^[A-Za-z0-9+\-\s]{1,80}$/;
+    const acceleratorRegex = /^[A-Za-z0-9+\-\s\\\[\]]{1,80}$/;
     for (const [action, combo] of Object.entries(keybinds)) {
         const safeAction = sanitizeText(action, { fieldName: 'keybind action', maxLength: 60, multiline: false });
         const safeCombo = sanitizeText(String(combo), { fieldName: `keybinds.${safeAction}`, maxLength: 80, multiline: false });

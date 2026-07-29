@@ -2,13 +2,16 @@ if (require('electron-squirrel-startup')) {
     process.exit(0);
 }
 
-const { app, BrowserWindow, shell, ipcMain, dialog } = require('electron');
+require('dotenv').config();
+
+const { app, BrowserWindow, shell, ipcMain, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { createWindow, updateGlobalShortcuts } = require('./utils/window');
 const { setupProviderRuntimeIpcHandlers, stopMacOSAudioCapture, sendToRenderer, clearRuntimeProviderSecrets } = require('./utils/providerRuntime');
 const storage = require('./storage');
+const { initTelegramBot, startPolling, stopPolling } = require('./utils/telegramBot');
 const { enforceIpcRateLimit } = require('./utils/abuseProtection');
 const {
     sanitizeText,
@@ -27,6 +30,7 @@ try {
 
 const providerSessionRef = { current: null };
 let mainWindow = null;
+let telegramPollingActive = false;
 const IPC_RATE_POLICIES = {
     historyRead: {
         windowMs: 60 * 1000,
@@ -142,6 +146,38 @@ app.whenReady().then(async () => {
     // Initialize storage (checks version, resets if needed)
     storage.initializeStorage();
 
+    // Initialize Telegram bot if credentials are available
+    const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+    const telegramUserId = process.env.TELEGRAM_USER_ID ? parseInt(process.env.TELEGRAM_USER_ID, 10) : null;
+    if (telegramToken) {
+        const botInitialized = initTelegramBot(telegramToken, telegramUserId, sendToRenderer);
+        if (botInitialized) {
+            startPolling(2000, 
+                (base64, caption, metadata) => {
+                    if (mainWindow) {
+                        mainWindow.webContents.send('telegram-image-received', {
+                            base64: base64,
+                            caption: caption,
+                            metadata: metadata,
+                        });
+                    }
+                },
+                (text, metadata) => {
+                    if (mainWindow) {
+                        mainWindow.webContents.send('telegram-text-received', {
+                            text: text,
+                            metadata: metadata,
+                        });
+                    }
+                }
+            );
+            telegramPollingActive = true;
+            console.log('[Telegram] Integration initialized and polling started');
+        }
+    } else {
+        console.log('[Telegram] No bot token configured, Telegram integration disabled');
+    }
+
     // Trigger screen recording permission prompt on macOS if not already granted
     if (process.platform === 'darwin') {
         const { desktopCapturer } = require('electron');
@@ -164,6 +200,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
     stopMacOSAudioCapture();
+    if (telegramPollingActive) {
+        stopPolling();
+        telegramPollingActive = false;
+    }
     clearRuntimeProviderSecrets();
     try {
         const creds = storage.getCredentials();
@@ -614,43 +654,6 @@ function setupGeneralIpcHandlers() {
             return { success: true, filePath };
         } catch (error) {
             console.error('Error saving text file:', error);
-            return { success: false, error: error.message };
-        }
-    });
-
-    ipcMain.handle('save-debug-screenshot', async (event, payload = {}) => {
-        try {
-            ensurePlainObject(payload, 'save-debug-screenshot payload');
-
-            const rawBase64 = String(payload.base64 || '').trim();
-            if (!rawBase64) {
-                return { success: false, error: 'Missing screenshot data' };
-            }
-
-            const mode = sanitizeText(String(payload.mode || 'manual'), {
-                fieldName: 'screenshot mode',
-                maxLength: 32,
-                multiline: false,
-            })
-                .toLowerCase()
-                .replace(/[^a-z0-9_-]/g, '') || 'manual';
-
-            const screenshotBuffer = Buffer.from(rawBase64, 'base64');
-            if (!screenshotBuffer || screenshotBuffer.length < 1000) {
-                return { success: false, error: 'Invalid screenshot data' };
-            }
-
-            const debugDir = path.join(app.getPath('pictures'), 'hintio-debug', 'screenshots');
-            fs.mkdirSync(debugDir, { recursive: true });
-
-            const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
-            const fileName = ensureSafeFilename(payload.fileName, `hintio-${mode}-${timestamp}.jpg`);
-            const outputPath = path.join(debugDir, fileName);
-
-            fs.writeFileSync(outputPath, screenshotBuffer);
-            return { success: true, filePath: outputPath };
-        } catch (error) {
-            console.error('Error saving debug screenshot:', error);
             return { success: false, error: error.message };
         }
     });

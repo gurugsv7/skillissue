@@ -1,11 +1,13 @@
 const WebSocket = require('ws');
 const { BrowserWindow } = require('electron');
 const { sanitizeText, ensureProfile } = require('./inputValidation');
+const { formatSpokenInterviewAnswer } = require('./answerFormatting');
 
 let cloudWs = null;
 let isCloudConnected = false;
 let currentCloudResponse = '';
 let currentTranscription = '';
+let currentProfile = 'interview';
 let isFirstChunk = true;
 let audioChunkCount = 0;
 let onTurnComplete = null;
@@ -44,6 +46,7 @@ function connectCloud(token, profile, userContext) {
         }
 
         const safeProfile = ensureProfile(String(profile || 'interview'), 'cloud profile');
+        currentProfile = safeProfile;
         const safeUserContext = sanitizeText(String(userContext || ''), {
             fieldName: 'cloud user context',
             maxLength: 8000,
@@ -124,13 +127,18 @@ function handleMessage(msg) {
 
         case 'response_chunk':
             currentCloudResponse += msg.text;
-            sendToRenderer(isFirstChunk ? 'new-response' : 'update-response', currentCloudResponse);
+            sendToRenderer(
+                isFirstChunk ? 'new-response' : 'update-response',
+                (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(currentCloudResponse) : currentCloudResponse
+            );
             isFirstChunk = false;
             break;
 
         case 'response_end':
             if (onTurnComplete && currentCloudResponse.trim()) {
-                onTurnComplete(currentTranscription, currentCloudResponse);
+                const savedResponse =
+                    (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(currentCloudResponse) : currentCloudResponse;
+                onTurnComplete(currentTranscription, savedResponse);
             }
             currentTranscription = '';
             sendToRenderer('update-status', 'Listening...');
@@ -202,6 +210,7 @@ function closeCloud() {
     isCloudConnected = false;
     currentCloudResponse = '';
     currentTranscription = '';
+    currentProfile = 'interview';
     isFirstChunk = true;
     audioChunkCount = 0;
     onTurnComplete = null;

@@ -56,9 +56,39 @@ let isTrialSessionTimedOut = false;
 
 const PROVIDER_SECRETS_CACHE_TTL_MS = 30 * 60 * 1000;
 const THREE_USAGE_SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+const FAST_INTERVIEW_CUSTOM_CONTEXT_MAX_CHARS = 1400;
+const FAST_INTERVIEW_GROQ_HISTORY_TURNS = 4;
+const FAST_INTERVIEW_GEMMA_HISTORY_CHARS = 8000;
+const FAST_INTERVIEW_MAX_OUTPUT_TOKENS = 420;
 const MIN_TURN_WORDS = 4;
 const DUPLICATE_TRANSCRIPT_WINDOW_MS = 25000;
 const MIN_MEANINGFUL_WORDS = 2;
+const QUESTION_LEAD_PATTERN = /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|was|were)\b/;
+const PROMPT_LEAD_PATTERN = /^(tell me|walk me through|explain|describe|compare|implement|write|build|design|solve|give me|can you|could you|would you)\b/;
+function getAzureReasoningEffort(azureDeployment = '') {
+    const deployment = String(azureDeployment || '').toLowerCase();
+
+    if (deployment.includes('gpt-5')) {
+        return 'medium';
+    }
+
+    return undefined;
+}
+
+const COMPARISON_STYLE_PATTERNS = [
+    /\b(flexbox|grid)\b.*\b(vs|versus|or)\b.*\b(flexbox|grid)\b/,
+    /\b(which one|which)\b.*\b(better|best|prefer|recommended)\b/,
+    /\b(when|where) (should|do) i use\b.*\b(flexbox|grid|memo|memoization|callback)\b/,
+    /\b(difference between|compare|comparison between)\b/,
+    /\b(choose|pick|use|go with|opt for)\b.*\b(flexbox|grid|memo|memoization|callback)\b/,
+];
+const DECISION_STYLE_PATTERNS = [
+    /\b(which|what)\b.*\b(should|could|would|can)\b.*\b(i|we|you)\b/,
+    /\b(should|could|would|can)\b.*\b(i|we|you)\b.*\b(choose|pick|use|go with|opt for|recommend|prefer)\b/,
+    /\b(which|what)\b.*\b(better|best|recommended|prefer)\b/,
+    /\b(compare|difference between|between|versus|vs)\b/,
+    /\b(help me decide|suggest|recommend|advise)\b/,
+];
 const FILLER_WORDS = new Set([
     'um',
     'uh',
@@ -125,12 +155,47 @@ function enforceTokenScopedLimit(name, rawToken, policy) {
     enforceNamedRateLimit(name, tokenKey, policy);
 }
 
+function logLatencyStart(provider, metadata = {}) {
+    const parts = Object.entries(metadata)
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ');
+    console.log(`[Latency][${provider}][Start] ${parts}`.trim());
+}
+
+function logLatencyError(provider, requestStartedAt, metadata = {}) {
+    const totalMs = Math.max(0, Date.now() - Number(requestStartedAt || Date.now()));
+    const parts = Object.entries({ totalMs, ...metadata })
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ');
+    console.log(`[Latency][${provider}][Error] ${parts}`.trim());
+}
+
 function normalizeTranscriptForGate(text = '') {
-    return String(text || '')
+    let normalized = String(text || '')
         .toLowerCase()
         .replace(/[^a-z0-9\s?]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
+
+    if (!normalized) return '';
+
+    const replacements = [
+        [/\bflex board\b/g, 'flexbox'],
+        [/\bflexboards\b/g, 'flexbox'],
+        [/\bflexboard\b/g, 'flexbox'],
+        [/\buse memo\b/g, 'usememo'],
+        [/\buse effect\b/g, 'useeffect'],
+        [/\buse callback\b/g, 'usecallback'],
+        [/\breact memo\b/g, 'reactmemo'],
+    ];
+
+    for (const [pattern, replacement] of replacements) {
+        normalized = normalized.replace(pattern, replacement);
+    }
+
+    return normalized;
 }
 
 function getGateWordStats(normalizedText = '') {
@@ -160,12 +225,15 @@ function isQuestionLikeTurn(normalizedText = '', stats = null) {
     if (meaningfulCount < MIN_MEANINGFUL_WORDS) return false;
 
     const hasQuestionMark = normalizedText.includes('?');
-    const startsWithQuestionCue = /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|was|were)\b/.test(normalizedText);
-    const startsWithPromptCue = /^(tell me|walk me through|explain|describe|compare|implement|write|build|design|solve|give me|can you|could you|would you)\b/.test(normalizedText);
+    const startsWithQuestionCue = QUESTION_LEAD_PATTERN.test(normalizedText);
+    const startsWithPromptCue = PROMPT_LEAD_PATTERN.test(normalizedText);
     const hasActionCue = /\b(explain|describe|compare|implement|write|build|design|solve|difference|between|approach|complexity|why|how|what|which)\b/.test(normalizedText);
+    const hasComparisonCue = COMPARISON_STYLE_PATTERNS.some((pattern) => pattern.test(normalizedText));
+    const hasDecisionCue = DECISION_STYLE_PATTERNS.some((pattern) => pattern.test(normalizedText));
 
-    if (hasQuestionMark && hasActionCue) return true;
-    return startsWithQuestionCue || startsWithPromptCue;
+    if (hasQuestionMark && (hasActionCue || hasDecisionCue || hasComparisonCue)) return true;
+    if (startsWithQuestionCue || startsWithPromptCue) return true;
+    return (hasDecisionCue && hasActionCue) || hasComparisonCue;
 }
 
 function shouldDispatchInterviewerTurn(transcription = '') {
@@ -298,6 +366,14 @@ async function resolveProviderSecrets(accessToken, options = {}) {
         azureEndpoint: data.azureEndpoint || '',
         azureDeployment: data.azureDeployment || '',
         cloudToken: data.cloudToken || '',
+        providerMode: data.providerMode || '',
+        expiresAt: data.expiresAt || '',
+        metadata: data.metadata || {},
+        maxInterviews: Number(data.maxInterviews || 0),
+        interviewsUsed: Number(data.interviewsUsed || 0),
+        interviewsRemaining: Number(data.interviewsRemaining || 0),
+        creditConsumed: Boolean(data.creditConsumed),
+        secretsIssued: Boolean(data.secretsIssued),
     };
 
     const shouldCacheSecrets = consume || data.secretsIssued === true;
@@ -612,6 +688,31 @@ function hasAzureKey() {
     return key && key.trim() !== '' && endpoint && endpoint.trim() !== '' && deployment && deployment.trim() !== '';
 }
 
+function compactFastContext(rawContext = '', maxChars = FAST_INTERVIEW_CUSTOM_CONTEXT_MAX_CHARS) {
+    const normalized = String(rawContext || '')
+        .replace(/\r/g, '')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        // Drop empty template placeholders like "Project summary:" with no value.
+        .filter(line => !/^[^:]{1,100}:\s*$/.test(line))
+        .join('\n');
+
+    if (!normalized) return '';
+    if (normalized.length <= maxChars) return normalized;
+    return `${normalized.slice(0, maxChars)}\n[context truncated for fast response]`;
+}
+
+function buildFastInterviewSystemPrompt(basePrompt, customContext = '') {
+    const compactContext = compactFastContext(customContext);
+    const finalPrompt = compactContext 
+        ? `${basePrompt}\n\nUser context:\n${compactContext}`
+        : basePrompt;
+    
+    // Re-enforce the format rule at the end for maximum impact
+    return `${finalPrompt}\n\n**REMEMBER: 30 seconds max. 3-4 lines total. No paragraphs. No linking words like because/however/therefore. Format: idea + how + tradeoff.**`;
+}
+
 function trimConversationHistoryForGemma(history, maxChars = 42000) {
     if (!history || history.length === 0) return [];
     let totalChars = 0;
@@ -630,6 +731,47 @@ function trimConversationHistoryForGemma(history, maxChars = 42000) {
 
 function stripThinkingTags(text) {
     return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+function formatInterviewAnswer(text = '', allowCode = false) {
+    const raw = String(text || '').replace(/\r/g, '').trim();
+    if (!raw) return '';
+    if (allowCode) return raw;
+    if (/`/.test(raw) || /===CODE_ISSUE_START===/i.test(raw) || /===CODE_ISSUE_END===/i.test(raw)) {
+        return raw;
+    }
+
+    const compact = raw.replace(/\n{2,}/g, '\n').replace(/[ \t]+/g, ' ').trim();
+    const sentences = compact
+        .split(/(?<=[.!?])\s+/)
+        .map(part => part.trim().replace(/^[-*•]\s+/, '').replace(/^\d+[.)]\s+/, ''))
+        .filter(Boolean);
+
+    if (sentences.length <= 1) {
+        return compact;
+    }
+
+    const fragments = [];
+
+    for (const sentence of sentences) {
+        const parts = sentence
+            .split(/\s*(?:,|;|—|--|\bbut\b|\bbecause\b|\bwhile\b|\band\b|\bso\b)\s+/i)
+            .map(part => part.trim())
+            .filter(Boolean);
+
+        for (const part of parts) {
+            if (part) {
+                const words = part.split(/\s+/).filter(Boolean);
+                const shortened = words.length > 6 ? words.slice(0, 6).join(' ') : part;
+                fragments.push(shortened);
+            }
+            if (fragments.length >= 2) break;
+        }
+
+        if (fragments.length >= 2) break;
+    }
+
+    return fragments.length ? fragments.join('\n\n') : compact;
 }
 
 function isLikelyCodingPrompt(transcription = '', response = '') {
@@ -1005,6 +1147,23 @@ async function sendToGroq(transcription) {
         content: transcription.trim(),
     });
 
+    const isInterview = (currentProfile === 'interview' || currentProfile === 'frontend-interview' || !currentProfile);
+    const historyToSend = isInterview ? groqConversationHistory.slice(-FAST_INTERVIEW_GROQ_HISTORY_TURNS) : groqConversationHistory;
+    const systemPrompt = isInterview
+        ? buildFastInterviewSystemPrompt(GROQ_FAST_SYSTEM_PROMPT, currentCustomPrompt)
+        : (currentSystemPrompt || 'You are a helpful assistant.');
+    const systemPromptChars = systemPrompt.length;
+    const historyChars = historyToSend.reduce((sum, msg) => sum + (msg.content || '').length, 0);
+    const requestStartedAt = Date.now();
+    let firstTokenAt = 0;
+
+    logLatencyStart('Groq', {
+        model: modelToUse,
+        promptChars: systemPromptChars,
+        historyChars,
+        isInterview,
+    });
+
     if (groqConversationHistory.length > 20) {
         groqConversationHistory = groqConversationHistory.slice(-20);
     }
@@ -1018,17 +1177,23 @@ async function sendToGroq(transcription) {
             },
             body: JSON.stringify({
                 model: modelToUse,
-                messages: [{ role: 'system', content: currentSystemPrompt || 'You are a helpful assistant.' }, ...groqConversationHistory],
+                messages: [{ role: 'system', content: systemPrompt }, ...historyToSend],
                 stream: true,
-                temperature: 0.3,
+                temperature: isInterview ? 0.25 : 0.3,
                 top_p: 0.85,
-                max_tokens: 1024,
+                max_tokens: isInterview ? FAST_INTERVIEW_MAX_OUTPUT_TOKENS : 1024,
             }),
         });
 
         if (!response.ok) {
             const errorText = await response.text();
             console.error('Groq API error:', response.status, errorText);
+            logLatencyError('Groq', requestStartedAt, {
+                status: response.status,
+                promptChars: systemPromptChars,
+                historyChars,
+                isInterview,
+            });
             sendToRenderer('update-status', `Groq error: ${response.status}`);
             return;
         }
@@ -1054,8 +1219,9 @@ async function sendToGroq(transcription) {
                         const json = JSON.parse(data);
                         const token = json.choices?.[0]?.delta?.content || '';
                         if (token) {
+                            if (!firstTokenAt) firstTokenAt = Date.now();
                             fullText += token;
-                            const displayText = stripThinkingTags(fullText);
+                            const displayText = formatInterviewAnswer(stripThinkingTags(fullText), false);
                             if (displayText) {
                                 sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
                                 isFirst = false;
@@ -1070,44 +1236,89 @@ async function sendToGroq(transcription) {
 
         const cleanedResponse = stripThinkingTags(fullText);
         const finalResponse = await maybeHumanizeCodeResponse(transcription, cleanedResponse, 'groq');
+        const interviewResponse = isInterview ? formatInterviewAnswer(finalResponse, false) : finalResponse;
         if (finalResponse && finalResponse !== cleanedResponse) {
-            sendToRenderer(isFirst ? 'new-response' : 'update-response', finalResponse);
+            sendToRenderer(isFirst ? 'new-response' : 'update-response', interviewResponse);
             isFirst = false;
         }
         const modelKey = modelToUse.split('/').pop();
 
-        const systemPromptChars = (currentSystemPrompt || 'You are a helpful assistant.').length;
-        const historyChars = groqConversationHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
         const inputChars = systemPromptChars + historyChars;
-        const outputChars = finalResponse.length;
+        const outputChars = interviewResponse.length;
 
         incrementCharUsage('groq', modelKey, inputChars + outputChars);
 
         if (finalResponse) {
             groqConversationHistory.push({
                 role: 'assistant',
-                content: finalResponse,
+                content: interviewResponse,
             });
 
-            saveConversationTurn(transcription, finalResponse);
+            if (groqConversationHistory.length > (isInterview ? 12 : 20)) {
+                groqConversationHistory = groqConversationHistory.slice(isInterview ? -12 : -20);
+            }
+
+            saveConversationTurn(transcription, interviewResponse);
             schedulePostAnswerSelfHeal({
                 transcription,
-                response: finalResponse,
+                response: interviewResponse,
                 provider: 'groq',
                 persistType: 'conversation',
             });
         }
 
+        const totalMs = Date.now() - requestStartedAt;
+        const ttftMs = firstTokenAt ? (firstTokenAt - requestStartedAt) : totalMs;
+        console.log(
+            `[Latency][Groq] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
+        );
+
         console.log(`Groq response completed (${modelToUse})`);
         sendToRenderer('update-status', 'Listening...');
     } catch (error) {
         console.error('Error calling Groq API:', error);
+        logLatencyError('Groq', requestStartedAt, {
+            message: error.message || 'request_failed',
+            promptChars: systemPromptChars,
+            historyChars,
+            isInterview,
+        });
         sendToRenderer('update-status', 'Groq error: ' + error.message);
     }
 }
 
 // Compact interview prompt - keeps input tokens low for fast TTFT
-const AZURE_FAST_SYSTEM_PROMPT = `You are an interview assistant helping a software professional in India. Give ready-to-speak answers in natural Indian English — direct, 3-5 spoken sentences, no bullet points, no markdown headers, no bold labels. Use connectors like "so", "basically", "see", "what happens is". For coding questions: brief explanation of approach first (2-3 sentences), then clean code. Output ONLY the words the user will speak.`;
+const FAST_INTERVIEW_SYSTEM_PROMPT = `You are a frontend interview assistant helping a software professional in India.
+
+**CRITICAL: 30 seconds max. NEVER write paragraphs. SPACE OUT YOUR POINTERS.**
+
+FORMAT (with BLANK LINES between):
+
+[POINTER 1 - Your choice]
+(One short line.)
+
+[POINTER 2 - Why you chose it]
+(One or two short lines.)
+
+[POINTER 3 - The tradeoff]
+(One or two short lines.)
+
+RULES:
+- Use SIMPLE words. NO jargon (don't say "structural alignment" say "column alignment"; don't say "scannability" say "easy to scan")
+- Give sentence STARTERS the user finishes (don't write full explanations)
+- BLANK LINES between pointers (don't make it look like a paragraph)
+- NO linking words: because, however, therefore, while, although
+- Sound like a person talking, not reading
+
+WRONG: "I would start by thinking about the requirement. This is a fintech flow where clarity matters more..."
+RIGHT:
+Mobile: Flexbox
+Why? One direction
+Tradeoff: Less control
+
+Think like a cheat sheet. Output ONLY the words the user will speak.`;
+const AZURE_FAST_SYSTEM_PROMPT = FAST_INTERVIEW_SYSTEM_PROMPT;
+const GROQ_FAST_SYSTEM_PROMPT = FAST_INTERVIEW_SYSTEM_PROMPT;
 
 async function sendToAzure(transcription) {
     if (isAzureResponseInFlight) {
@@ -1140,7 +1351,7 @@ async function sendToAzure(transcription) {
 
     // For interview profile: send ZERO history — fastest TTFT (~1.5s vs 1.9s with 6 turns).
     // Each interview question is independent. For other profiles keep 4 turns for context.
-    const isInterview = (currentProfile === 'interview' || !currentProfile);
+    const isInterview = (currentProfile === 'interview' || currentProfile === 'frontend-interview' || !currentProfile);
     const historyToSend = isInterview ? [] : groqConversationHistory.slice(-4);
 
     if (groqConversationHistory.length > 6) {
@@ -1149,14 +1360,26 @@ async function sendToAzure(transcription) {
 
     // Use compact prompt for fast TTFT; fall back to session prompt only for non-interview profiles
     const systemPrompt = isInterview
-        ? AZURE_FAST_SYSTEM_PROMPT + (currentCustomPrompt ? `\n\nUser context:\n${currentCustomPrompt}` : '')
+        ? buildFastInterviewSystemPrompt(AZURE_FAST_SYSTEM_PROMPT, currentCustomPrompt)
         : (currentSystemPrompt || AZURE_FAST_SYSTEM_PROMPT);
+    const systemPromptChars = systemPrompt.length;
+    const historyChars = historyToSend.reduce((sum, msg) => sum + (msg.content || '').length, 0);
+    const requestStartedAt = Date.now();
+    let firstTokenAt = 0;
+
+    logLatencyStart('Azure', {
+        deployment: azureDeployment,
+        promptChars: systemPromptChars,
+        historyChars,
+        isInterview,
+    });
 
     try {
         const apiVersion = '2025-04-01-preview';
         let baseEndpoint = azureEndpoint.replace(/\/$/, '');
         baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
         const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${apiVersion}`;
+        const reasoningEffort = getAzureReasoningEffort(azureDeployment);
 
         const response = await fetch(url, {
             method: 'POST',
@@ -1173,13 +1396,19 @@ async function sendToAzure(transcription) {
                 stream: true,
                 temperature: 1,
                 max_completion_tokens: 350,
-                reasoning_effort: 'low',
+                ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
             }),
         });
 
         if (!response.ok) {
             const errorText = await response.text();
             console.error('Azure OpenAI API error:', response.status, errorText);
+            logLatencyError('Azure', requestStartedAt, {
+                status: response.status,
+                promptChars: systemPromptChars,
+                historyChars,
+                isInterview,
+            });
             sendToRenderer('update-status', `Azure error: ${response.status}`);
             return;
         }
@@ -1205,6 +1434,7 @@ async function sendToAzure(transcription) {
                         const json = JSON.parse(data);
                         const token = json.choices?.[0]?.delta?.content || '';
                         if (token) {
+                            if (!firstTokenAt) firstTokenAt = Date.now();
                             fullText += token;
                             const displayText = stripThinkingTags(fullText);
                             if (displayText) {
@@ -1221,13 +1451,12 @@ async function sendToAzure(transcription) {
 
         const cleanedResponse = stripThinkingTags(fullText);
         const finalResponse = await maybeHumanizeCodeResponse(transcription, cleanedResponse, 'azure');
+        const interviewResponse = isInterview ? formatInterviewAnswer(finalResponse, false) : finalResponse;
         if (finalResponse && finalResponse !== cleanedResponse) {
-            sendToRenderer(isFirst ? 'new-response' : 'update-response', finalResponse);
+            sendToRenderer(isFirst ? 'new-response' : 'update-response', interviewResponse);
             isFirst = false;
         }
 
-        const systemPromptChars = (currentSystemPrompt || 'You are a helpful assistant.').length;
-        const historyChars = groqConversationHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
         const inputChars = systemPromptChars + historyChars;
         const outputChars = finalResponse.length;
 
@@ -1236,7 +1465,7 @@ async function sendToAzure(transcription) {
         if (finalResponse) {
             groqConversationHistory.push({
                 role: 'assistant',
-                content: finalResponse,
+                content: interviewResponse,
             });
 
             // Keep history lean after adding the assistant reply
@@ -1244,19 +1473,31 @@ async function sendToAzure(transcription) {
                 groqConversationHistory = groqConversationHistory.slice(-6);
             }
 
-            saveConversationTurn(transcription, finalResponse);
+            saveConversationTurn(transcription, interviewResponse);
             schedulePostAnswerSelfHeal({
                 transcription,
-                response: finalResponse,
+                response: interviewResponse,
                 provider: 'azure',
                 persistType: 'conversation',
             });
         }
 
+        const totalMs = Date.now() - requestStartedAt;
+        const ttftMs = firstTokenAt ? (firstTokenAt - requestStartedAt) : totalMs;
+        console.log(
+            `[Latency][Azure] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
+        );
+
         console.log(`Azure OpenAI response completed (${azureDeployment})`);
         sendToRenderer('update-status', 'Listening...');
     } catch (error) {
         console.error('Error calling Azure OpenAI API:', error);
+        logLatencyError('Azure', requestStartedAt, {
+            message: error.message || 'request_failed',
+            promptChars: systemPromptChars,
+            historyChars,
+            isInterview,
+        });
         sendToRenderer('update-status', 'Azure error: ' + error.message);
     } finally {
         isAzureResponseInFlight = false;
@@ -1345,12 +1586,35 @@ Rules:
 
         const userContent = imageDataList
             .filter((img) => typeof img === 'string' && img.length > 100)
-            .map((img) => ({
-                type: 'image_url',
-                image_url: {
-                    url: `data:image/jpeg;base64,${img}`,
-                },
-            }));
+            .map((img) => {
+                // Log the first 50 characters to diagnose format issues
+                const first50 = img.slice(0, 50);
+                console.log(`[AZURE VISION] Image first 50 chars: "${first50}"`);
+                
+                // Check if it already has data URI prefix (double encoding issue)
+                if (img.startsWith('data:')) {
+                    console.error('[AZURE VISION] ⚠ WARNING: Base64 already has data: prefix! This will cause double encoding. Removing...');
+                    const cleanBase64 = img.replace(/^data:[^;]*;base64,/, '');
+                    return {
+                        type: 'image_url',
+                        image_url: {
+                            url: `data:image/jpeg;base64,${cleanBase64}`,
+                        },
+                    };
+                }
+                
+                // Check if starts with JPEG magic bytes
+                if (!img.startsWith('/9j/')) {
+                    console.error(`[AZURE VISION] ⚠ WARNING: Base64 doesn't start with "/9j/" (JPEG magic bytes). Starts with: "${img.slice(0, 10)}"`);
+                }
+                
+                return {
+                    type: 'image_url',
+                    image_url: {
+                        url: `data:image/jpeg;base64,${img}`,
+                    },
+                };
+            });
 
         if (userContent.length === 0) {
             return { success: false, error: 'No valid image payload provided' };
@@ -1409,7 +1673,7 @@ Rules:
                         const token = json.choices?.[0]?.delta?.content || '';
                         if (token) {
                             fullText += token;
-                            sendToRenderer(isFirst ? 'new-response' : 'update-response', fullText);
+                            sendToRenderer(isFirst ? 'new-response' : 'update-response', formatInterviewAnswer(fullText, false));
                             isFirst = false;
                         }
                     } catch (parseError) {
@@ -1479,7 +1743,25 @@ async function sendToGemma(transcription) {
         content: transcription.trim(),
     });
 
-    const trimmedHistory = trimConversationHistoryForGemma(groqConversationHistory, 42000);
+    const isInterview = (currentProfile === 'interview' || currentProfile === 'frontend-interview' || !currentProfile);
+    const trimmedHistory = trimConversationHistoryForGemma(
+        groqConversationHistory,
+        isInterview ? FAST_INTERVIEW_GEMMA_HISTORY_CHARS : 42000
+    );
+    const systemPrompt = isInterview
+        ? buildFastInterviewSystemPrompt(FAST_INTERVIEW_SYSTEM_PROMPT, currentCustomPrompt)
+        : (currentSystemPrompt || 'You are a helpful assistant.');
+    const systemPromptChars = systemPrompt.length;
+    const historyChars = trimmedHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
+    const requestStartedAt = Date.now();
+    let firstTokenAt = 0;
+
+    logLatencyStart('Gemma', {
+        model: 'gemma-3-27b-it',
+        promptChars: systemPromptChars,
+        historyChars,
+        isInterview,
+    });
 
     try {
         const ai = new GoogleGenAI({ apiKey: apiKey });
@@ -1489,7 +1771,6 @@ async function sendToGemma(transcription) {
             parts: [{ text: msg.content }],
         }));
 
-        const systemPrompt = currentSystemPrompt || 'You are a helpful assistant.';
         const messagesWithSystem = [
             { role: 'user', parts: [{ text: systemPrompt }] },
             { role: 'model', parts: [{ text: 'Understood. I will follow these instructions.' }] },
@@ -1507,42 +1788,54 @@ async function sendToGemma(transcription) {
         for await (const chunk of response) {
             const chunkText = chunk.text;
             if (chunkText) {
+                if (!firstTokenAt) firstTokenAt = Date.now();
                 fullText += chunkText;
-                sendToRenderer(isFirst ? 'new-response' : 'update-response', fullText);
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', formatInterviewAnswer(fullText, false));
                 isFirst = false;
             }
         }
 
-        const systemPromptChars = (currentSystemPrompt || 'You are a helpful assistant.').length;
-        const historyChars = trimmedHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
         const inputChars = systemPromptChars + historyChars;
         const outputChars = fullText.length;
 
         incrementCharUsage('gemini', 'gemma-3-27b-it', inputChars + outputChars);
 
         if (fullText.trim()) {
+            const interviewResponse = isInterview ? formatInterviewAnswer(fullText, false) : fullText;
             groqConversationHistory.push({
                 role: 'assistant',
-                content: fullText.trim(),
+                content: interviewResponse.trim(),
             });
 
             if (groqConversationHistory.length > 40) {
-                groqConversationHistory = groqConversationHistory.slice(-40);
+                groqConversationHistory = groqConversationHistory.slice(isInterview ? -16 : -40);
             }
 
-            saveConversationTurn(transcription, fullText);
+            saveConversationTurn(transcription, interviewResponse);
             schedulePostAnswerSelfHeal({
                 transcription,
-                response: fullText,
+                response: interviewResponse,
                 provider: null,
                 persistType: 'conversation',
             });
         }
 
+        const totalMs = Date.now() - requestStartedAt;
+        const ttftMs = firstTokenAt ? (firstTokenAt - requestStartedAt) : totalMs;
+        console.log(
+            `[Latency][Gemma] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
+        );
+
         console.log('Gemma response completed');
         sendToRenderer('update-status', 'Listening...');
     } catch (error) {
         console.error('Error calling Gemma API:', error);
+        logLatencyError('Gemma', requestStartedAt, {
+            message: error.message || 'request_failed',
+            promptChars: systemPromptChars,
+            historyChars,
+            isInterview,
+        });
         sendToRenderer('update-status', 'Gemma error: ' + error.message);
     }
 }
@@ -2237,7 +2530,16 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         // so Groq / Azure / Gemma use the right instructions.
         if (!currentSystemPrompt || profileChanged) {
             const googleSearchEnabled = true; // conservative default for text queries
-            currentSystemPrompt = getSystemPrompt(resolvedProfile, currentCustomPrompt || '', googleSearchEnabled, currentVoiceProfile);
+            let systemPrompt = getSystemPrompt(resolvedProfile, currentCustomPrompt || '', googleSearchEnabled, currentVoiceProfile);
+            
+            // Detect if this is an interview-style question and enforce strict pointer format
+            const isInterviewStyleQuestion = /\b(how|why|explain|walk me through|compare|difference|implement|build|design|approach)\b/i.test(text);
+            if (isInterviewStyleQuestion && !systemPrompt.includes('**CRITICAL: Your answer must be speakable in 30 seconds')) {
+                // Append strict format enforcement for interview questions (spaced pointers, simple language)
+                systemPrompt += `\n\n**INTERVIEW QUESTION DETECTED - STRICT FORMAT:**\n\n[POINTER 1]\n(One short line. Simple words.)\n\n[POINTER 2]\n(One or two short lines.)\n\n[POINTER 3]\n(One or two short lines.)\n\nUse BLANK LINES between pointers. Use SIMPLE words (no jargon). Give sentence starters, not full explanations. NO because/however/therefore. 30 seconds max.`;
+            }
+            
+            currentSystemPrompt = systemPrompt;
         }
 
         // Access-token mode (Azure only)

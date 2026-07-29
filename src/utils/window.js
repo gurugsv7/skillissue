@@ -1,6 +1,7 @@
 const { BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
 const path = require('node:path');
 const storage = require('../storage');
+const { setWindowAsTopmost, enforceWindowOnTop, forceWindowToFront } = require('./windowsNativeApi');
 
 let mouseEventsIgnored = false;
 let currentView = 'main';
@@ -9,6 +10,55 @@ const DEFAULT_WIDTH = 1080;
 const DEFAULT_HEIGHT = 560;
 const LIVE_WIDTH = 850;
 const LIVE_HEIGHT = 400;
+
+function normalizeAcceleratorForPlatform(keybind) {
+    const raw = String(keybind || '').trim();
+    if (!raw) return '';
+
+    if (process.platform === 'darwin') {
+        return raw.replace(/\bCtrl\b/gi, 'Cmd');
+    }
+
+    return raw.replace(/\bCmd\b/gi, 'Ctrl');
+}
+
+function registerGlobalShortcut(action, keybind, handler) {
+    const accelerator = normalizeAcceleratorForPlatform(keybind);
+    if (!accelerator) {
+        console.warn(`[Shortcuts] Skipped ${action}: empty accelerator`);
+        return false;
+    }
+
+    try {
+        const success = globalShortcut.register(accelerator, handler);
+        if (!success) {
+            console.error(`[Shortcuts] Failed to register ${action}: ${accelerator} (conflict or invalid accelerator)`);
+            return false;
+        }
+
+        console.log(`Registered ${action}: ${accelerator}`);
+        return true;
+    } catch (error) {
+        console.error(`Failed to register ${action} (${accelerator}):`, error);
+        return false;
+    }
+}
+
+function dispatchRendererShortcut(mainWindow, shortcutKey) {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    mainWindow.webContents.executeJavaScript(`
+        (() => {
+            if (window.hintio && typeof window.hintio.handleShortcut === 'function') {
+                window.hintio.handleShortcut(${JSON.stringify(shortcutKey)});
+            } else {
+                console.warn('[SHORTCUT] window.hintio.handleShortcut unavailable for:', ${JSON.stringify(shortcutKey)});
+            }
+        })();
+    `).catch((error) => {
+        console.error('[SHORTCUT] Failed to dispatch shortcut to renderer:', error);
+    });
+}
 
 function createWindow(sendToRenderer, providerSessionRef) {
     const visibleMode = false;
@@ -77,6 +127,31 @@ function createWindow(sendToRenderer, providerSessionRef) {
 
     if (!visibleMode && process.platform === 'win32') {
         mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+        
+        // Try wrapper approach for additional safety
+        try {
+            setWindowAsTopmost(mainWindow);
+        } catch (error) {
+            console.warn('[Window] Initial topmost set via wrapper failed:', error.message);
+        }
+        
+        // For Mettl Secure Browser and other high-security environments,
+        // periodically re-assert the window's top position since they may
+        // aggressively manage z-order and hide overlays
+        const ensureWindowOnTopInterval = setInterval(() => {
+            if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+                try {
+                    setWindowAsTopmost(mainWindow);
+                } catch (error) {
+                    console.debug('[Window] Periodic topmost enforcement failed:', error.message);
+                }
+            }
+        }, 500); // 500ms interval for aggressive enforcement
+        
+        // Clean up interval on window close
+        mainWindow.on('closed', () => {
+            clearInterval(ensureWindowOnTopInterval);
+        });
     }
 
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
@@ -98,6 +173,32 @@ function createWindow(sendToRenderer, providerSessionRef) {
     });
 
     setupWindowIpcHandlers(mainWindow, sendToRenderer, providerSessionRef);
+
+    // Enhanced event handlers for secure browser environments like Mettl
+    // These ensure the overlay stays visible and on top
+    mainWindow.on('blur', () => {
+        if (!visibleMode && process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
+            // Re-apply always-on-top when window loses focus (Mettl may try to hide it)
+            mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+            setWindowAsTopmost(mainWindow);
+        }
+    });
+
+    mainWindow.on('show', () => {
+        if (!visibleMode && process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
+            // Reapply always-on-top when window is shown
+            mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+            setWindowAsTopmost(mainWindow);
+        }
+    });
+
+    mainWindow.on('minimize', () => {
+        if (!visibleMode && mainWindow && !mainWindow.isDestroyed()) {
+            // Prevent minimization in overlay mode
+            mainWindow.restore();
+            mainWindow.showInactive();
+        }
+    });
 
     return mainWindow;
 }
@@ -166,307 +267,173 @@ function updateGlobalShortcuts(keybinds, mainWindow, sendToRenderer, providerSes
     Object.keys(movementActions).forEach(action => {
         const keybind = keybinds[action];
         if (keybind) {
-            try {
-                globalShortcut.register(keybind, movementActions[action]);
-                console.log(`Registered ${action}: ${keybind}`);
-            } catch (error) {
-                console.error(`Failed to register ${action} (${keybind}):`, error);
-            }
+            registerGlobalShortcut(action, keybind, movementActions[action]);
         }
     });
 
     // Register toggle visibility shortcut
     if (keybinds.toggleVisibility) {
-        try {
-            globalShortcut.register(keybinds.toggleVisibility, () => {
-                if (mainWindow.isVisible()) {
-                    mainWindow.hide();
-                } else {
-                    mainWindow.showInactive();
-                }
-            });
-            console.log(`Registered toggleVisibility: ${keybinds.toggleVisibility}`);
-        } catch (error) {
-            console.error(`Failed to register toggleVisibility (${keybinds.toggleVisibility}):`, error);
-        }
+        registerGlobalShortcut('toggleVisibility', keybinds.toggleVisibility, () => {
+            if (mainWindow.isVisible()) {
+                mainWindow.hide();
+            } else {
+                mainWindow.showInactive();
+            }
+        });
     }
 
     // Register toggle click-through shortcut
     if (keybinds.toggleClickThrough) {
-        try {
-            globalShortcut.register(keybinds.toggleClickThrough, () => {
-                if (currentView !== 'assistant') {
-                    if (mouseEventsIgnored) {
-                        mouseEventsIgnored = false;
-                        mainWindow.setIgnoreMouseEvents(false);
-                        mainWindow.webContents.send('click-through-toggled', false);
-                    }
-                    return;
-                }
-
-                mouseEventsIgnored = !mouseEventsIgnored;
+        registerGlobalShortcut('toggleClickThrough', keybinds.toggleClickThrough, () => {
+            if (currentView !== 'assistant') {
                 if (mouseEventsIgnored) {
-                    mainWindow.setIgnoreMouseEvents(true, { forward: true });
-                    console.log('Mouse events ignored');
-                } else {
+                    mouseEventsIgnored = false;
                     mainWindow.setIgnoreMouseEvents(false);
-                    console.log('Mouse events enabled');
+                    mainWindow.webContents.send('click-through-toggled', false);
                 }
-                mainWindow.webContents.send('click-through-toggled', mouseEventsIgnored);
-            });
-            console.log(`Registered toggleClickThrough: ${keybinds.toggleClickThrough}`);
-        } catch (error) {
-            console.error(`Failed to register toggleClickThrough (${keybinds.toggleClickThrough}):`, error);
-        }
+                return;
+            }
+
+            mouseEventsIgnored = !mouseEventsIgnored;
+            if (mouseEventsIgnored) {
+                mainWindow.setIgnoreMouseEvents(true, { forward: true });
+                console.log('Mouse events ignored');
+            } else {
+                mainWindow.setIgnoreMouseEvents(false);
+                console.log('Mouse events enabled');
+            }
+            mainWindow.webContents.send('click-through-toggled', mouseEventsIgnored);
+        });
     }
 
     // Register next step shortcut (either starts session or takes screenshot based on view)
     if (keybinds.nextStep) {
-        try {
-            globalShortcut.register(keybinds.nextStep, async () => {
-                console.log('Next step shortcut triggered');
-                try {
-                    // Determine the shortcut key format
-                    const isMac = process.platform === 'darwin';
-                    const shortcutKey = isMac ? 'cmd+enter' : 'ctrl+enter';
-
-                    // Use the new handleShortcut function
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('${shortcutKey}');
-                    `);
-                } catch (error) {
-                    console.error('Error handling next step shortcut:', error);
-                }
-            });
-            console.log(`Registered nextStep: ${keybinds.nextStep}`);
-        } catch (error) {
-            console.error(`Failed to register nextStep (${keybinds.nextStep}):`, error);
-        }
+        registerGlobalShortcut('nextStep', keybinds.nextStep, async () => {
+            console.log('Next step shortcut triggered');
+            const isMac = process.platform === 'darwin';
+            const shortcutKey = isMac ? 'cmd+enter' : 'ctrl+enter';
+            dispatchRendererShortcut(mainWindow, shortcutKey);
+        });
     }
 
     // Register previous response shortcut
     if (keybinds.dualScreenshot) {
-        try {
-            globalShortcut.register(keybinds.dualScreenshot, async () => {
-                console.log('Dual screenshot shortcut triggered');
-                try {
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('dual-screenshot');
-                    `);
-                } catch (error) {
-                    console.error('Error handling dual screenshot shortcut:', error);
-                }
-            });
-            console.log(`Registered dualScreenshot: ${keybinds.dualScreenshot}`);
-        } catch (error) {
-            console.error(`Failed to register dualScreenshot (${keybinds.dualScreenshot}):`, error);
-        }
+        registerGlobalShortcut('dualScreenshot', keybinds.dualScreenshot, async () => {
+            console.log('Dual screenshot shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'dual-screenshot');
+        });
     }
 
     if (keybinds.dualScreenshotFinish) {
-        try {
-            globalShortcut.register(keybinds.dualScreenshotFinish, async () => {
-                console.log('Dual screenshot finish shortcut triggered');
-                try {
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('dual-screenshot-finish');
-                    `);
-                } catch (error) {
-                    console.error('Error handling dual screenshot finish shortcut:', error);
-                }
-            });
-            console.log(`Registered dualScreenshotFinish: ${keybinds.dualScreenshotFinish}`);
-        } catch (error) {
-            console.error(`Failed to register dualScreenshotFinish (${keybinds.dualScreenshotFinish}):`, error);
-        }
+        registerGlobalShortcut('dualScreenshotFinish', keybinds.dualScreenshotFinish, async () => {
+            console.log('Dual screenshot finish shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'dual-screenshot-finish');
+        });
     }
 
     if (keybinds.debugScreenshot) {
-        try {
-            globalShortcut.register(keybinds.debugScreenshot, async () => {
-                console.log('Debug screenshot shortcut triggered');
-                try {
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('debug-screenshot');
-                    `);
-                } catch (error) {
-                    console.error('Error handling debug screenshot shortcut:', error);
-                }
-            });
-            console.log(`Registered debugScreenshot: ${keybinds.debugScreenshot}`);
-        } catch (error) {
-            console.error(`Failed to register debugScreenshot (${keybinds.debugScreenshot}):`, error);
-        }
+        registerGlobalShortcut('debugScreenshot', keybinds.debugScreenshot, async () => {
+            console.log('Debug screenshot shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'debug-screenshot');
+        });
     }
 
     // Register previous response shortcut
     if (keybinds.previousResponse) {
-        try {
-            globalShortcut.register(keybinds.previousResponse, () => {
-                console.log('Previous response shortcut triggered');
-                sendToRenderer('navigate-previous-response');
-            });
-            console.log(`Registered previousResponse: ${keybinds.previousResponse}`);
-        } catch (error) {
-            console.error(`Failed to register previousResponse (${keybinds.previousResponse}):`, error);
-        }
+        registerGlobalShortcut('previousResponse', keybinds.previousResponse, () => {
+            console.log('Previous response shortcut triggered');
+            sendToRenderer('navigate-previous-response');
+        });
     }
 
     // Register next response shortcut
     if (keybinds.nextResponse) {
-        try {
-            globalShortcut.register(keybinds.nextResponse, () => {
-                console.log('Next response shortcut triggered');
-                sendToRenderer('navigate-next-response');
-            });
-            console.log(`Registered nextResponse: ${keybinds.nextResponse}`);
-        } catch (error) {
-            console.error(`Failed to register nextResponse (${keybinds.nextResponse}):`, error);
-        }
+        registerGlobalShortcut('nextResponse', keybinds.nextResponse, () => {
+            console.log('Next response shortcut triggered');
+            sendToRenderer('navigate-next-response');
+        });
     }
 
     // Register scroll up shortcut
     if (keybinds.scrollUp) {
-        try {
-            globalShortcut.register(keybinds.scrollUp, () => {
-                console.log('Scroll up shortcut triggered');
-                sendToRenderer('scroll-response-up');
-            });
-            console.log(`Registered scrollUp: ${keybinds.scrollUp}`);
-        } catch (error) {
-            console.error(`Failed to register scrollUp (${keybinds.scrollUp}):`, error);
-        }
+        registerGlobalShortcut('scrollUp', keybinds.scrollUp, () => {
+            console.log('Scroll up shortcut triggered');
+            sendToRenderer('scroll-response-up');
+        });
     }
 
     // Register scroll down shortcut
     if (keybinds.scrollDown) {
-        try {
-            globalShortcut.register(keybinds.scrollDown, () => {
-                console.log('Scroll down shortcut triggered');
-                sendToRenderer('scroll-response-down');
-            });
-            console.log(`Registered scrollDown: ${keybinds.scrollDown}`);
-        } catch (error) {
-            console.error(`Failed to register scrollDown (${keybinds.scrollDown}):`, error);
-        }
+        registerGlobalShortcut('scrollDown', keybinds.scrollDown, () => {
+            console.log('Scroll down shortcut triggered');
+            sendToRenderer('scroll-response-down');
+        });
     }
 
     // Register emergency erase shortcut
     if (keybinds.emergencyErase) {
-        try {
-            globalShortcut.register(keybinds.emergencyErase, () => {
-                console.log('Emergency Erase triggered!');
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.hide();
+        registerGlobalShortcut('emergencyErase', keybinds.emergencyErase, () => {
+            console.log('Emergency Erase triggered!');
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.hide();
 
-                    if (providerSessionRef.stopSTT) {
-                        providerSessionRef.stopSTT();
-                        providerSessionRef.stopSTT = null;
-                    }
-                    if (providerSessionRef.current) {
-                        providerSessionRef.current.close();
-                        providerSessionRef.current = null;
-                    }
-
-                    sendToRenderer('clear-sensitive-data');
-
-                    setTimeout(() => {
-                        const { app } = require('electron');
-                        app.quit();
-                    }, 300);
+                if (providerSessionRef.stopSTT) {
+                    providerSessionRef.stopSTT();
+                    providerSessionRef.stopSTT = null;
                 }
-            });
-            console.log(`Registered emergencyErase: ${keybinds.emergencyErase}`);
-        } catch (error) {
-            console.error(`Failed to register emergencyErase (${keybinds.emergencyErase}):`, error);
-        }
+                if (providerSessionRef.current) {
+                    providerSessionRef.current.close();
+                    providerSessionRef.current = null;
+                }
+
+                sendToRenderer('clear-sensitive-data');
+
+                setTimeout(() => {
+                    const { app } = require('electron');
+                    app.quit();
+                }, 300);
+            }
+        });
     }
 
     // Register focus text input shortcut
     if (keybinds.focusTextInput) {
-        try {
-            globalShortcut.register(keybinds.focusTextInput, () => {
-                console.log('Focus text input shortcut triggered');
-                mainWindow.webContents.executeJavaScript(`
-                    hintio.handleShortcut('focus-text-input');
-                `);
-            });
-            console.log(`Registered focusTextInput: ${keybinds.focusTextInput}`);
-        } catch (error) {
-            console.error(`Failed to register focusTextInput (${keybinds.focusTextInput}):`, error);
-        }
+        registerGlobalShortcut('focusTextInput', keybinds.focusTextInput, () => {
+            console.log('Focus text input shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'focus-text-input');
+        });
     }
 
     // Register submit text input shortcut
     if (keybinds.submitTextInput) {
-        try {
-            globalShortcut.register(keybinds.submitTextInput, () => {
-                console.log('Submit text input shortcut triggered');
-                mainWindow.webContents.executeJavaScript(`
-                    hintio.handleShortcut('submit-text-input');
-                `);
-            });
-            console.log(`Registered submitTextInput: ${keybinds.submitTextInput}`);
-        } catch (error) {
-            console.error(`Failed to register submitTextInput (${keybinds.submitTextInput}):`, error);
-        }
+        registerGlobalShortcut('submitTextInput', keybinds.submitTextInput, () => {
+            console.log('Submit text input shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'submit-text-input');
+        });
     }
 
     // Register dock-left shortcut (switch to coding + dock left)
     if (keybinds.dockLeft) {
-        try {
-            globalShortcut.register(keybinds.dockLeft, async () => {
-                console.log('Dock-left shortcut triggered');
-                try {
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('dock-left');
-                    `);
-                } catch (error) {
-                    console.error('Error handling dock-left shortcut:', error);
-                }
-            });
-            console.log(`Registered dockLeft: ${keybinds.dockLeft}`);
-        } catch (error) {
-            console.error(`Failed to register dockLeft (${keybinds.dockLeft}):`, error);
-        }
+        registerGlobalShortcut('dockLeft', keybinds.dockLeft, async () => {
+            console.log('Dock-left shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'dock-left');
+        });
     }
 
     // Register dock-right shortcut
     if (keybinds.dockRight) {
-        try {
-            globalShortcut.register(keybinds.dockRight, async () => {
-                console.log('Dock-right shortcut triggered');
-                try {
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('dock-right');
-                    `);
-                } catch (error) {
-                    console.error('Error handling dock-right shortcut:', error);
-                }
-            });
-            console.log(`Registered dockRight: ${keybinds.dockRight}`);
-        } catch (error) {
-            console.error(`Failed to register dockRight (${keybinds.dockRight}):`, error);
-        }
+        registerGlobalShortcut('dockRight', keybinds.dockRight, async () => {
+            console.log('Dock-right shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'dock-right');
+        });
     }
 
     // Register dock-default shortcut
     if (keybinds.dockDefault) {
-        try {
-            globalShortcut.register(keybinds.dockDefault, async () => {
-                console.log('Dock-default shortcut triggered');
-                try {
-                    mainWindow.webContents.executeJavaScript(`
-                        hintio.handleShortcut('dock-default');
-                    `);
-                } catch (error) {
-                    console.error('Error handling dock-default shortcut:', error);
-                }
-            });
-            console.log(`Registered dockDefault: ${keybinds.dockDefault}`);
-        } catch (error) {
-            console.error(`Failed to register dockDefault (${keybinds.dockDefault}):`, error);
-        }
+        registerGlobalShortcut('dockDefault', keybinds.dockDefault, async () => {
+            console.log('Dock-default shortcut triggered');
+            dispatchRendererShortcut(mainWindow, 'dock-default');
+        });
     }
 }
 
@@ -523,6 +490,16 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, providerSessionRef) 
                 mainWindow.hide();
             } else {
                 mainWindow.showInactive();
+                // For Mettl Secure Browser compatibility, ensure the window is truly on top
+                if (process.platform === 'win32') {
+                    // Small delay to ensure the show completes before re-applying always-on-top
+                    setTimeout(() => {
+                        if (!mainWindow.isDestroyed()) {
+                            mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+                            setWindowAsTopmost(mainWindow);
+                        }
+                    }, 50);
+                }
             }
             return { success: true };
         } catch (error) {
