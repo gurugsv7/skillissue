@@ -1,22 +1,37 @@
 const crypto = require('crypto');
 
 const buckets = new Map();
+const MAX_BUCKETS = 10_000;
+let lastCleanupAt = 0;
 
 function nowMs() {
     return Date.now();
 }
 
 function hashValue(value) {
-    return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+    return crypto
+        .createHash('sha256')
+        .update(String(value || ''))
+        .digest('hex');
 }
 
 function normalizePolicy(policy = {}) {
     return {
-        windowMs: Number(policy.windowMs || 60_000),
-        max: Number(policy.max || 30),
-        blockDurationMs: Number(policy.blockDurationMs || 120_000),
+        windowMs: Math.min(Math.max(Number(policy.windowMs) || 60_000, 1_000), 86_400_000),
+        max: Math.min(Math.max(Number(policy.max) || 30, 1), 10_000),
+        blockDurationMs: Math.min(Math.max(Number(policy.blockDurationMs) || 120_000, 1_000), 86_400_000),
         message: String(policy.message || 'Too many requests. Please slow down.'),
     };
+}
+
+function cleanupBuckets(currentTime) {
+    if (buckets.size < MAX_BUCKETS && currentTime - lastCleanupAt < 60_000) return;
+    lastCleanupAt = currentTime;
+    for (const [key, state] of buckets) {
+        const expiresAt = Math.max(state.windowStartedAt + state.windowMs, state.blockedUntil || 0);
+        if (expiresAt <= currentTime) buckets.delete(key);
+    }
+    while (buckets.size >= MAX_BUCKETS) buckets.delete(buckets.keys().next().value);
 }
 
 function getBucketKey(name, key) {
@@ -27,6 +42,7 @@ function enforceNamedRateLimit(name, key, policy) {
     const normalizedPolicy = normalizePolicy(policy);
     const bucketKey = getBucketKey(name, key || 'anonymous');
     const currentTime = nowMs();
+    cleanupBuckets(currentTime);
 
     let state = buckets.get(bucketKey);
     if (!state) {
@@ -34,6 +50,7 @@ function enforceNamedRateLimit(name, key, policy) {
             count: 0,
             windowStartedAt: currentTime,
             blockedUntil: 0,
+            windowMs: normalizedPolicy.windowMs,
         };
     }
 
@@ -48,6 +65,7 @@ function enforceNamedRateLimit(name, key, policy) {
     }
 
     state.count += 1;
+    state.windowMs = normalizedPolicy.windowMs;
 
     if (state.count > normalizedPolicy.max) {
         state.blockedUntil = currentTime + normalizedPolicy.blockDurationMs;

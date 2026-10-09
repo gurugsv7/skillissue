@@ -1,8 +1,5 @@
 // renderer.js
-const { ipcRenderer } = require('electron');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+const ipcRenderer = window.electronAPI;
 
 let mediaStream = null;
 let screenshotInterval = null;
@@ -39,35 +36,35 @@ If text/content is split across images, merge it logically before answering.
 function detectErrorIndicatorsInImage(base64String) {
     try {
         // Decode first chunk to analyze
-        const buffer = Buffer.from(base64String.slice(0, 10000), 'base64');
-        
+        atob(base64String.slice(0, 10000));
+
         // Look for red color indicators in JPEG (rough heuristic based on JPEG structure)
         // This is a simple heuristic - red components often dominate in error screenshots
         const redIndicators = [];
-        
+
         // Check for common error keywords that might appear in JPEG metadata or text regions
         // (Note: Full JPEG analysis would require actual image parsing library)
         // For now, we'll use a simpler heuristic based on image characteristics
-        
+
         // Indicator 1: JPEG file size - error screenshots often have certain characteristics
         const sizeKB = base64String.length / 1024;
         if (sizeKB < 20) {
             // Very small images might be error messages or focused error areas
             redIndicators.push('small_file_size');
         }
-        
+
         // Indicator 2: Check if first few bytes match JPEG header
         if (!base64String.startsWith('/9j/')) {
             redIndicators.push('not_valid_jpeg');
         }
-        
+
         // Conservative approach: if we detect any indicators, flag it for manual review
         // In production, you'd use vision-based analysis or ML model
         const hasError = redIndicators.length > 0;
         const confidence = redIndicators.length === 0 ? 0 : 0.3; // Low confidence for now
-        
+
         console.log(`[TELEGRAM DEBUG] Error analysis - indicators: ${JSON.stringify(redIndicators)}, confidence: ${confidence}`);
-        
+
         return {
             hasError: hasError,
             confidence: confidence,
@@ -84,14 +81,14 @@ function detectErrorIndicatorsInImage(base64String) {
  */
 async function sendTelegramImageInDebugMode(base64, caption, metadata) {
     if (telegramImageRequestInFlight) return;
-    
+
     console.log('[TELEGRAM DEBUG] Activating debug mode for error analysis');
     telegramImageRequestInFlight = true;
 
     try {
         const previousCodeContext = buildPreviousCodeContext();
         const debugPrompt = `${DEBUG_SCREENSHOT_PROMPT}${previousCodeContext}`;
-        
+
         hintio.setStatus('Analyzing error in debug mode...');
 
         const result = await ipcRenderer.invoke('send-image-content', {
@@ -119,8 +116,8 @@ const MAX_DUAL_SCREENSHOT_IMAGES = 3;
 let lastInitErrorMessage = '';
 let currentSessionLimitMs = null;
 
-const isLinux = process.platform === 'linux';
-const isMacOS = process.platform === 'darwin';
+const isLinux = window.electronAPI.platform === 'linux';
+const isMacOS = window.electronAPI.platform === 'darwin';
 
 // ============ STORAGE API ============
 // Wrapper for IPC-based storage access
@@ -192,12 +189,12 @@ const storage = {
     async setAzureEndpoint(azureEndpoint) {
         return ipcRenderer.invoke('storage:set-azure-endpoint', azureEndpoint);
     },
-    async getAzureDeployment() {
-        const result = await ipcRenderer.invoke('storage:get-azure-deployment');
+    async getGeminiModel() {
+        const result = await ipcRenderer.invoke('storage:get-gemini-model');
         return result.success ? result.data : '';
     },
-    async setAzureDeployment(azureDeployment) {
-        return ipcRenderer.invoke('storage:set-azure-deployment', azureDeployment);
+    async setGeminiModel(geminiModel) {
+        return ipcRenderer.invoke('storage:set-gemini-model', geminiModel);
     },
 
     // Preferences
@@ -304,7 +301,7 @@ function buildCombinedContext(prefs) {
 }
 
 function deriveSessionLimitMs(providerSecrets = {}) {
-    const metadata = (providerSecrets && typeof providerSecrets.metadata === 'object') ? providerSecrets.metadata : {};
+    const metadata = providerSecrets && typeof providerSecrets.metadata === 'object' ? providerSecrets.metadata : {};
     const metadataLimit = Number(metadata.sessionTimeoutMs ?? metadata.session_timeout_ms ?? metadata.sessionLimitMs ?? 0);
     if (Number.isFinite(metadataLimit) && metadataLimit > 0) {
         return Math.floor(metadataLimit);
@@ -318,7 +315,7 @@ function deriveSessionLimitMs(providerSecrets = {}) {
     return null;
 }
 
-async function initializeAzure(profile = 'interview', language = 'en-US') {
+async function initializeGemini(profile = 'interview', language = 'en-US') {
     const accessToken = await storage.getAccessToken();
     if (!accessToken || !accessToken.trim()) {
         lastInitErrorMessage = 'Access token is required.';
@@ -337,7 +334,7 @@ async function initializeAzure(profile = 'interview', language = 'en-US') {
     currentSessionLimitMs = deriveSessionLimitMs(preflight.data || {});
 
     const prefs = await storage.getPreferences();
-    const initResult = await ipcRenderer.invoke('initialize-azure', accessToken.trim(), buildCombinedContext(prefs), profile, language);
+    const initResult = await ipcRenderer.invoke('initialize-gemini', accessToken.trim(), buildCombinedContext(prefs), profile, language);
     const success = initResult === true || initResult?.success === true;
     if (success) {
         lastInitErrorMessage = '';
@@ -345,7 +342,7 @@ async function initializeAzure(profile = 'interview', language = 'en-US') {
         return true;
     }
 
-    const runtimeError = typeof initResult === 'object' ? (initResult.error || '') : '';
+    const runtimeError = typeof initResult === 'object' ? initResult.error || '' : '';
     if (runtimeError) {
         lastInitErrorMessage = parseAccessTokenErrorMessage(runtimeError);
     }
@@ -368,7 +365,7 @@ function parseAccessTokenErrorMessage(errorText = '') {
     if (normalized.includes('access token is required') || normalized.includes('missing access token')) {
         return 'Access token is required.';
     }
-    if (normalized.includes('azure openai credentials are not configured')) {
+    if (normalized.includes('gemini api key is not configured')) {
         return 'Service is not configured right now. Please try again shortly.';
     }
     if (normalized.includes('groq stt key not configured')) {
@@ -413,12 +410,7 @@ async function getProviderSecrets(accessToken = null, options = {}) {
 
     const token = resolvedAccessToken.trim();
     const now = Date.now();
-    if (
-        !consume
-        && providerSecretsCache
-        && providerSecretsToken === token
-        && (now - providerSecretsResolvedAt) < PROVIDER_SECRETS_CACHE_TTL_MS
-    ) {
+    if (!consume && providerSecretsCache && providerSecretsToken === token && now - providerSecretsResolvedAt < PROVIDER_SECRETS_CACHE_TTL_MS) {
         return { success: true, data: providerSecretsCache, cached: true };
     }
 
@@ -685,10 +677,15 @@ function setupLinuxSystemAudioProcessing() {
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
-            await ipcRenderer.invoke('send-audio-content', {
-                data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
+            // Fire and forget. Awaiting the reply inside the audio callback
+            // meant a busy main process (streaming SSE) backed audio up here,
+            // which delays silence detection and therefore the whole answer.
+            ipcRenderer
+                .invoke('send-audio-content', {
+                    data: base64Data,
+                    mimeType: 'audio/pcm;rate=24000',
+                })
+                .catch(() => {});
         }
     };
 
@@ -715,10 +712,15 @@ function setupWindowsLoopbackProcessing() {
             const pcmData16 = convertFloat32ToInt16(chunk);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
-            await ipcRenderer.invoke('send-audio-content', {
-                data: base64Data,
-                mimeType: 'audio/pcm;rate=24000',
-            });
+            // Fire and forget. Awaiting the reply inside the audio callback
+            // meant a busy main process (streaming SSE) backed audio up here,
+            // which delays silence detection and therefore the whole answer.
+            ipcRenderer
+                .invoke('send-audio-content', {
+                    data: base64Data,
+                    mimeType: 'audio/pcm;rate=24000',
+                })
+                .catch(() => {});
         }
     };
 
@@ -833,7 +835,16 @@ Format:
 - MCQ: "Q1: [question]" then "ANS: [correct option letter]) [option text]" — identify which option letter (A/B/C/D/etc.) is actually correct and output that letter. NEVER default to A unless A is genuinely the right answer. Example: "ANS: C) Nominal Data"
 - Math: "Q: [question]" then "ANS: [final answer]"
 - Code: "Q: [question]" then "ANS: [working code — no preamble, start with the code block]"
-- Text: "Q: [question]" then "ANS: [1-2 sentence answer]"
+- Text / explanation: "Q: [question]" then "ANS:" followed by 2-4 POINTERS, each on its own line starting with "- ".
+  Each pointer is ONE short line, about 12 words, that the candidate can say out loud and then defend.
+  Never write an explanation as a paragraph or as one long sentence.
+  Never stack acronyms. Name at most one metric per pointer, and say in plain words what it means.
+  Wrong: "No—95% accuracy may simply mean the model predicts no default for nearly everyone, matching the majority-class baseline, so examine the confusion matrix, recall/precision, F1-score, PR-AUC, ROC-AUC and expected business cost."
+  Right:
+  - No. If only 5% default, always saying "no default" already scores 95%.
+  - So the model can be useless and still look accurate.
+  - I'd look at recall: of the people who actually defaulted, how many did we catch?
+  - I'd also weigh the cost: a missed defaulter loses money, a wrong rejection loses a customer.
 
 CODE TEMPLATE PRESERVATION (CRITICAL):
 - If the screenshot shows starter/template code (e.g., LeetCode class + function signature), preserve that structure.
@@ -952,9 +963,7 @@ function buildPreviousCodeContext() {
     if (!fallbackCode.trim()) return '';
 
     const MAX_CONTEXT_CHARS = 7000;
-    const trimmed = fallbackCode.length > MAX_CONTEXT_CHARS
-        ? fallbackCode.slice(fallbackCode.length - MAX_CONTEXT_CHARS)
-        : fallbackCode;
+    const trimmed = fallbackCode.length > MAX_CONTEXT_CHARS ? fallbackCode.slice(fallbackCode.length - MAX_CONTEXT_CHARS) : fallbackCode;
 
     return `\n\nPREVIOUS_CODE_CONTEXT (use this if screenshot code is partial):\n\`\`\`\n${trimmed}\n\`\`\``;
 }
@@ -1049,14 +1058,14 @@ async function sendPendingTelegramImages(trigger = 'manual') {
     const imagesToSend = pendingTelegramImagesBuffer.map(img => img.base64);
     const allPrompts = pendingTelegramImagesBuffer.map(img => img.caption).filter(p => p);
     const allMetadata = pendingTelegramImagesBuffer.map(img => img.metadata);
-    
+
     clearPendingTelegramImageState();
 
     // ============ ERROR DETECTION + AUTO-DEBUG ============
     console.log('[TELEGRAM DEBUG] Running error detection on buffered images...');
     let detectedErrorInBatch = false;
     let errorImageIndex = -1;
-    
+
     for (let i = 0; i < imagesToSend.length; i++) {
         const analysis = detectErrorIndicatorsInImage(imagesToSend[i]);
         if (analysis.hasError && analysis.confidence > 0.2) {
@@ -1070,26 +1079,26 @@ async function sendPendingTelegramImages(trigger = 'manual') {
     // If error detected, send in debug mode instead of regular prompt
     if (detectedErrorInBatch && errorImageIndex >= 0) {
         console.log(`[TELEGRAM DEBUG] 🔴 AUTO-ACTIVATING DEBUG MODE for image ${errorImageIndex + 1}/${imagesToSend.length}`);
-        
+
         if (telegramImageRequestInFlight) return;
         telegramImageRequestInFlight = true;
 
         try {
             const previousCodeContext = buildPreviousCodeContext();
             const debugPrompt = `${DEBUG_SCREENSHOT_PROMPT}${previousCodeContext}`;
-            
+
             hintio.setStatus('🔴 DEBUG MODE: Analyzing error in Telegram image...');
             console.log('[TELEGRAM DEBUG] Sending with DEBUG_SCREENSHOT_PROMPT + previous code context');
 
             const result = await ipcRenderer.invoke('send-image-content', {
                 images: [imagesToSend[errorImageIndex]],
                 prompt: debugPrompt,
-                metadata: { 
+                metadata: {
                     source: 'telegram',
                     mode: 'debug',
                     errorDetectedAt: errorImageIndex,
                     totalImages: imagesToSend.length,
-                    ...allMetadata[errorImageIndex]
+                    ...allMetadata[errorImageIndex],
                 },
             });
 
@@ -1378,8 +1387,10 @@ async function sendTextMessage(text) {
     // transcription — so default to 'exam' (general tutor) rather than 'interview'.
     let profile = window.hintio?.element()?.selectedProfile || 'interview';
 
-    const codingPattern = /(code|function|algorithm|script|program|implement|debug|error|bug|fix|class|object|array|loop|recursion|sql|query|api|regex|json|html|css|javascript|python|java|typescript|react|node|express|django|flask|spring|bash|shell|git|docker|kubernetes|linux|terminal|database|http|async|promise|callback|lambda|deploy|build|compile|sort|search|binary|tree|graph|linked list|stack|queue|heap|hash|dynamic programming)/i;
-    const directQuestionPattern = /^(give me|write|create|generate|show me|explain|what is|what are|how (do|does|can|to)|why (is|does|do|did)|when (is|was)|where (is|does)|who (is|are)|define|describe|list|compare|difference between|help me|can you|could you|i need|make me|build|design|calculate|solve|find|tell me|summarize)/i;
+    const codingPattern =
+        /(code|function|algorithm|script|program|implement|debug|error|bug|fix|class|object|array|loop|recursion|sql|query|api|regex|json|html|css|javascript|python|java|typescript|react|node|express|django|flask|spring|bash|shell|git|docker|kubernetes|linux|terminal|database|http|async|promise|callback|lambda|deploy|build|compile|sort|search|binary|tree|graph|linked list|stack|queue|heap|hash|dynamic programming)/i;
+    const directQuestionPattern =
+        /^(give me|write|create|generate|show me|explain|what is|what are|how (do|does|can|to)|why (is|does|do|did)|when (is|was)|where (is|does)|who (is|are)|define|describe|list|compare|difference between|help me|can you|could you|i need|make me|build|design|calculate|solve|find|tell me|summarize)/i;
     const mcqPattern = /(following|choose|correct answer|option [abcd]|\d+\s*[\)\.]|A\)|B\)|C\)|D\)|which of the|select the|mark the)/i;
 
     if (mcqPattern.test(text) || codingPattern.test(text) || directQuestionPattern.test(text)) {
@@ -1465,7 +1476,6 @@ ipcRenderer.on('telegram-image-received', async (event, data) => {
         console.log(`\n[TELEGRAM] Image received from Telegram`);
         console.log(`[TELEGRAM]   Caption: "${caption}"`);
         console.log(`[TELEGRAM]   Image Size: ${(base64.length / 1024).toFixed(2)} KB`);
-        console.log(`[TELEGRAM]   First 30 chars of base64: "${base64.slice(0, 30)}"`);
         if (metadata?.userId) console.log(`[TELEGRAM]   From UserID: ${metadata.userId}`);
         if (metadata?.timestamp) console.log(`[TELEGRAM]   Timestamp: ${new Date(metadata.timestamp * 1000).toISOString()}`);
 
@@ -1478,7 +1488,6 @@ ipcRenderer.on('telegram-image-received', async (event, data) => {
 
         console.log(`[TELEGRAM] Buffered image ${pendingTelegramImagesBuffer.length} - waiting ${TELEGRAM_IMAGE_COLLECTION_WAIT_MS}ms for more...`);
         armTelegramImageTimeout();
-
     } catch (error) {
         console.error('Error handling telegram image:', error);
     }
@@ -1592,15 +1601,15 @@ function handleShortcut(shortcutKey) {
 
     if (shortcutKey === 'focus-text-input') {
         console.log('[FOCUS DEBUG] Shortcut triggered, currentView:', currentView);
-        
+
         if (currentView === 'assistant') {
             console.log('[FOCUS DEBUG] View is assistant, finding element');
             const assistantView = document.querySelector('assistant-view');
             console.log('[FOCUS DEBUG] assistantView element found:', !!assistantView);
-            
+
             if (assistantView) {
                 console.log('[FOCUS DEBUG] Current _inputExpanded state:', assistantView._inputExpanded);
-                
+
                 // Expand the input if not already expanded
                 if (!assistantView._inputExpanded) {
                     console.log('[FOCUS DEBUG] Setting _inputExpanded to true');
@@ -1609,30 +1618,32 @@ function handleShortcut(shortcutKey) {
                 } else {
                     console.log('[FOCUS DEBUG] Input already expanded');
                 }
-                
+
                 // Wait for Lit to complete rendering before focusing
                 console.log('[FOCUS DEBUG] Waiting for updateComplete...');
-                assistantView.updateComplete.then(() => {
-                    console.log('[FOCUS DEBUG] updateComplete resolved');
-                    const textInput = assistantView.shadowRoot?.querySelector('#textInput');
-                    console.log('[FOCUS DEBUG] textInput found:', !!textInput);
-                    
-                    if (textInput) {
-                        console.log('[FOCUS DEBUG] Focusing and selecting input');
-                        textInput.focus();
-                        textInput.select();
-                        console.log('[FOCUS DEBUG] Text input focused and ready');
-                    } else {
-                        console.log('[FOCUS DEBUG] ERROR: textInput not found in shadowRoot');
-                        // Try without shadow root as fallback
-                        const fallbackInput = document.querySelector('#textInput');
-                        console.log('[FOCUS DEBUG] Fallback input found:', !!fallbackInput);
-                        if (fallbackInput) {
-                            fallbackInput.focus();
-                            fallbackInput.select();
+                assistantView.updateComplete
+                    .then(() => {
+                        console.log('[FOCUS DEBUG] updateComplete resolved');
+                        const textInput = assistantView.shadowRoot?.querySelector('#textInput');
+                        console.log('[FOCUS DEBUG] textInput found:', !!textInput);
+
+                        if (textInput) {
+                            console.log('[FOCUS DEBUG] Focusing and selecting input');
+                            textInput.focus();
+                            textInput.select();
+                            console.log('[FOCUS DEBUG] Text input focused and ready');
+                        } else {
+                            console.log('[FOCUS DEBUG] ERROR: textInput not found in shadowRoot');
+                            // Try without shadow root as fallback
+                            const fallbackInput = document.querySelector('#textInput');
+                            console.log('[FOCUS DEBUG] Fallback input found:', !!fallbackInput);
+                            if (fallbackInput) {
+                                fallbackInput.focus();
+                                fallbackInput.select();
+                            }
                         }
-                    }
-                }).catch(err => console.warn('[FOCUS DEBUG] updateComplete error:', err));
+                    })
+                    .catch(err => console.warn('[FOCUS DEBUG] updateComplete error:', err));
             } else {
                 console.log('[FOCUS DEBUG] ERROR: assistantView element not found');
             }
@@ -1957,7 +1968,7 @@ const hintio = {
     updateCurrentResponse: response => hintioApp.updateCurrentResponse(response),
 
     // Core functionality
-    initializeAzure,
+    initializeGemini,
     startCapture,
     stopCapture,
     sendTextMessage,
@@ -1967,7 +1978,7 @@ const hintio = {
     clearSessionProviderSecrets,
     handleShortcut,
     saveTextFile,
-    repositionWindow: async (hint) => ipcRenderer.invoke('reposition-window', hint),
+    repositionWindow: async hint => ipcRenderer.invoke('reposition-window', hint),
 
     // Storage API
     storage,

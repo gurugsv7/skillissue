@@ -20,7 +20,7 @@ export class OnboardingView extends LitElement {
             left: 0;
             overflow: hidden;
             background: #09090b;
-            color: #FAFAFA;
+            color: #fafafa;
         }
 
         .icon {
@@ -28,7 +28,11 @@ export class OnboardingView extends LitElement {
             font-weight: normal;
             font-style: normal;
             line-height: 1;
-            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+            font-variation-settings:
+                'FILL' 1,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 20;
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -41,12 +45,18 @@ export class OnboardingView extends LitElement {
             display: flex;
             align-items: center;
             justify-content: center;
-            background-image: 
+            background-image:
                 radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.12) 0%, transparent 50%),
                 linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-            background-size: 100% 100%, 40px 40px, 40px 40px;
-            background-position: top center, center center, center center;
+            background-size:
+                100% 100%,
+                40px 40px,
+                40px 40px;
+            background-position:
+                top center,
+                center center,
+                center center;
             padding: 40px;
         }
 
@@ -63,8 +73,14 @@ export class OnboardingView extends LitElement {
         }
 
         @keyframes slideUpFade {
-            from { opacity: 0; transform: translateY(16px); }
-            to { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(16px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .step-indicator {
@@ -221,7 +237,9 @@ export class OnboardingView extends LitElement {
             font-size: 13px;
             font-weight: 500;
             cursor: pointer;
-            transition: color 0.2s, background 0.2s;
+            transition:
+                color 0.2s,
+                background 0.2s;
             margin-left: -12px; /* Pull left to align text visually */
         }
 
@@ -257,9 +275,9 @@ export class OnboardingView extends LitElement {
 
     _openHelpGuide() {
         const helpUrl = 'https://www.hintio.tech/help';
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
-            ipcRenderer.invoke('open-external', helpUrl).catch((error) => {
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
+            ipcRenderer.invoke('open-external', helpUrl).catch(error => {
                 console.error('Failed to open help guide:', error);
             });
             return;
@@ -287,10 +305,12 @@ export class OnboardingView extends LitElement {
                     <div class="step-dot"></div>
                     <div class="step-dot"></div>
                 </div>
-                
+
                 <div class="header-group">
                     <div class="title">Welcome to Hintio</div>
-                    <div class="subtitle">A precise, low-latency assistant designed to give you the competitive edge in high-stakes environments.</div>
+                    <div class="subtitle">
+                        A precise, low-latency assistant designed to give you the competitive edge in high-stakes environments.
+                    </div>
                 </div>
 
                 <div class="feature-list">
@@ -318,7 +338,12 @@ export class OnboardingView extends LitElement {
                 </div>
 
                 <div class="actions">
-                    <button class="btn-primary" @click=${() => { this.currentSlide = 1; }}>
+                    <button
+                        class="btn-primary"
+                        @click=${() => {
+                            this.currentSlide = 1;
+                        }}
+                    >
                         Configure Setup <span class="icon" style="font-size: 16px;">arrow_forward</span>
                     </button>
                 </div>
@@ -348,11 +373,21 @@ export class OnboardingView extends LitElement {
                 ></textarea>
 
                 <div class="actions">
-                    <button class="btn-secondary" @click=${() => { this.currentSlide = 0; }}>
+                    <button
+                        class="btn-secondary"
+                        @click=${() => {
+                            this.currentSlide = 0;
+                        }}
+                    >
                         <span class="icon">arrow_back</span> Back
                     </button>
                     ${!this.contextText.trim() ? html`<span class="skip-hint">You can add this later.</span>` : ''}
-                    <button class="btn-primary" @click=${() => { this.currentSlide = 2; }}>
+                    <button
+                        class="btn-primary"
+                        @click=${() => {
+                            this.currentSlide = 2;
+                        }}
+                    >
                         Continue
                     </button>
                 </div>
@@ -371,9 +406,7 @@ export class OnboardingView extends LitElement {
 
                 <div class="header-group">
                     <div class="title">Read this before start</div>
-                    <div class="subtitle">
-                        Before using your access key, check this help guide for proper instructions on usage.
-                    </div>
+                    <div class="subtitle">Before using your access key, check this help guide for proper instructions on usage.</div>
                 </div>
 
                 <div class="feature-list" style="margin-bottom: 28px;">
@@ -387,15 +420,16 @@ export class OnboardingView extends LitElement {
                 </div>
 
                 <div class="actions">
-                    <button class="btn-secondary" @click=${() => { this.currentSlide = 1; }}>
+                    <button
+                        class="btn-secondary"
+                        @click=${() => {
+                            this.currentSlide = 1;
+                        }}
+                    >
                         <span class="icon">arrow_back</span> Back
                     </button>
-                    <button class="btn-secondary" @click=${() => this._openHelpGuide()}>
-                        Open Help Guide
-                    </button>
-                    <button class="btn-primary" @click=${this.completeOnboarding}>
-                        Go to Start Session
-                    </button>
+                    <button class="btn-secondary" @click=${() => this._openHelpGuide()}>Open Help Guide</button>
+                    <button class="btn-primary" @click=${this.completeOnboarding}>Go to Start Session</button>
                 </div>
             </div>
         `;
@@ -404,11 +438,7 @@ export class OnboardingView extends LitElement {
     render() {
         return html`
             <div class="onboarding">
-                ${this.currentSlide === 0
-                    ? this.renderSlideOne()
-                    : this.currentSlide === 1
-                        ? this.renderSlideTwo()
-                        : this.renderSlideThree()}
+                ${this.currentSlide === 0 ? this.renderSlideOne() : this.currentSlide === 1 ? this.renderSlideTwo() : this.renderSlideThree()}
             </div>
         `;
     }

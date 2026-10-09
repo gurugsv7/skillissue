@@ -11,7 +11,11 @@ const {
     ensureLanguageCode,
     ensureSafeUrl,
     ensureProfile,
+    isValidAccessToken,
 } = require('./utils/inputValidation');
+// Default Gemini model for the fallback provider. Kept here rather than
+// imported so storage has no dependency on the provider layer.
+const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
 
 const CONFIG_VERSION = 1;
 
@@ -22,12 +26,15 @@ const DEFAULT_CONFIG = {
     layout: 'normal',
 };
 
+// Fields removed from the schema that may still exist in a user's saved
+// credentials.json. Tolerated on write, never re-persisted.
+const RETIRED_CREDENTIAL_KEYS = new Set(['azureDeployment']);
+
 const DEFAULT_CREDENTIALS = {
     apiKey: '',
     groqApiKey: '',
     azureApiKey: '',
     azureEndpoint: '',
-    azureDeployment: '',
     cloudToken: '',
     supabaseUrl: '',
     supabaseAnonKey: '',
@@ -50,6 +57,8 @@ const DEFAULT_PREFERENCES = {
     ollamaModel: 'llama3.1',
     whisperModel: 'Xenova/whisper-small',
     skipVoiceCalibration: false,
+    geminiModel: DEFAULT_GEMINI_MODEL,
+    interviewDomain: '',
 };
 
 const DEFAULT_KEYBINDS = null; // null means use system defaults
@@ -210,11 +219,13 @@ function sanitizeConfigPatch(configPatch) {
 function sanitizeCredentialsPatch(credentialsPatch) {
     ensurePlainObject(credentialsPatch, 'credentials');
     const sanitized = {};
-    const tokenRegex = /^SKI-[A-Za-z0-9_-]{20,252}$/;
-    const genericTokenRegex = /^[A-Za-z0-9_-]{6,256}$/;
-
     for (const [key, value] of Object.entries(credentialsPatch)) {
         if (!Object.prototype.hasOwnProperty.call(DEFAULT_CREDENTIALS, key)) {
+            // A retired field still present in an older credentials.json on
+            // disk. The renderer reads the whole object and writes it back, so
+            // throwing here breaks EVERY credential save on an existing
+            // install. Drop it instead — it is gone on the next write.
+            if (RETIRED_CREDENTIAL_KEYS.has(key)) continue;
             throw new Error(`Unknown credentials key: ${key}`);
         }
 
@@ -231,7 +242,7 @@ function sanitizeCredentialsPatch(credentialsPatch) {
 
         if (key === 'cloudToken') {
             const tokenValue = sanitizeText(String(value), { fieldName: 'credentials.cloudToken', maxLength: 256, multiline: false });
-            if (tokenValue && !tokenRegex.test(tokenValue) && !genericTokenRegex.test(tokenValue)) {
+            if (tokenValue && !isValidAccessToken(tokenValue)) {
                 throw new Error('credentials.cloudToken has invalid format');
             }
             sanitized[key] = tokenValue;
@@ -282,15 +293,25 @@ const PREFERENCE_KEYS = {
     },
     backgroundTransparency: value => ensureNumber(value, { fieldName: 'preferences.backgroundTransparency', min: 0, max: 1 }),
     googleSearchEnabled: value => ensureBoolean(value, 'preferences.googleSearchEnabled'),
-    ollamaHost: value => ensureSafeUrl(String(value), {
-        fieldName: 'preferences.ollamaHost',
-        protocols: ['http:', 'https:'],
-        allowLocalhost: true,
-        maxLength: 512,
-    }),
+    ollamaHost: value =>
+        ensureSafeUrl(String(value), {
+            fieldName: 'preferences.ollamaHost',
+            protocols: ['http:', 'https:'],
+            allowLocalhost: true,
+            maxLength: 512,
+        }),
     ollamaModel: value => sanitizeText(String(value), { fieldName: 'preferences.ollamaModel', maxLength: 200, multiline: false }),
     whisperModel: value => sanitizeText(String(value), { fieldName: 'preferences.whisperModel', maxLength: 200, multiline: false }),
     skipVoiceCalibration: value => ensureBoolean(value, 'preferences.skipVoiceCalibration'),
+    interviewDomain: value => sanitizeText(String(value), { fieldName: 'preferences.interviewDomain', maxLength: 200, multiline: false }),
+    geminiModel: value => {
+        const model = sanitizeText(String(value), { fieldName: 'preferences.geminiModel', maxLength: 100, multiline: false });
+        if (!model) return DEFAULT_GEMINI_MODEL;
+        if (!/^[a-z0-9.-]+$/i.test(model)) {
+            throw new Error('preferences.geminiModel has invalid format');
+        }
+        return model;
+    },
 };
 
 function sanitizePreferencesPatch(preferencesPatch) {
@@ -399,12 +420,20 @@ function setAzureEndpoint(azureEndpoint) {
     return setCredentials({ azureEndpoint });
 }
 
-function getAzureDeployment() {
-    return getCredentials().azureDeployment || '';
+function getInterviewDomain() {
+    return getPreferences().interviewDomain || '';
 }
 
-function setAzureDeployment(azureDeployment) {
-    return setCredentials({ azureDeployment });
+function setInterviewDomain(interviewDomain) {
+    return setPreferences({ interviewDomain });
+}
+
+function getGeminiModel() {
+    return getPreferences().geminiModel || DEFAULT_GEMINI_MODEL;
+}
+
+function setGeminiModel(geminiModel) {
+    return setPreferences({ geminiModel });
 }
 
 function clearProviderSecrets() {
@@ -413,8 +442,7 @@ function clearProviderSecrets() {
         groqApiKey: '',
         azureApiKey: '',
         azureEndpoint: '',
-        azureDeployment: '',
-    });
+        });
 }
 
 // ============ PREFERENCES ============
@@ -554,10 +582,14 @@ function incrementCharUsage(provider, model, charCount) {
     const today = getTodayDateString();
     const todayEntry = limits.data.find(entry => entry.date === today);
 
-    if (todayEntry[provider] && todayEntry[provider][model]) {
-        todayEntry[provider][model].chars += charCount;
-        setLimits(limits);
+    if (!todayEntry[provider]) {
+        todayEntry[provider] = {};
     }
+    if (!todayEntry[provider][model]) {
+        todayEntry[provider][model] = { chars: 0 };
+    }
+    todayEntry[provider][model].chars += charCount;
+    setLimits(limits);
 
     return todayEntry;
 }
@@ -752,8 +784,6 @@ module.exports = {
     setAzureApiKey,
     getAzureEndpoint,
     setAzureEndpoint,
-    getAzureDeployment,
-    setAzureDeployment,
     clearProviderSecrets,
 
     // Preferences
@@ -771,6 +801,10 @@ module.exports = {
     getTodayLimits,
     incrementLimitCount,
     getAvailableModel,
+    getGeminiModel,
+    setGeminiModel,
+    getInterviewDomain,
+    setInterviewDomain,
     incrementCharUsage,
     getModelForToday,
 

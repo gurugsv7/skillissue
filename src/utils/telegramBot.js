@@ -46,7 +46,7 @@ function initTelegramBot(token, userId = null, sendCallback = null) {
     botUserId = userId;
     ipcSendCallback = sendCallback;
 
-    console.log('[Telegram] Bot initialized with token:', botToken.slice(0, 10) + '...');
+    console.log('[Telegram] Bot initialized');
     return true;
 }
 
@@ -62,33 +62,41 @@ async function downloadTelegramFile(fileId) {
         // Get file info
         const fileInfoUrl = `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`;
 
-        https.get(fileInfoUrl, res => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    if (!json.ok) {
-                        reject(new Error(`Telegram API error: ${json.description}`));
-                        return;
+        https
+            .get(fileInfoUrl, res => {
+                let data = '';
+                res.on('data', chunk => {
+                    data += chunk;
+                });
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        if (!json.ok) {
+                            reject(new Error(`Telegram API error: ${json.description}`));
+                            return;
+                        }
+
+                        const filePath = json.result.file_path;
+                        const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+
+                        // Download file as buffer chunks
+                        https
+                            .get(downloadUrl, fileRes => {
+                                const chunks = [];
+                                fileRes.on('data', chunk => {
+                                    chunks.push(chunk);
+                                });
+                                fileRes.on('end', () => {
+                                    resolve(Buffer.concat(chunks));
+                                });
+                            })
+                            .on('error', reject);
+                    } catch (error) {
+                        reject(error);
                     }
-
-                    const filePath = json.result.file_path;
-                    const downloadUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
-
-                    // Download file as buffer chunks
-                    https.get(downloadUrl, fileRes => {
-                        const chunks = [];
-                        fileRes.on('data', chunk => { chunks.push(chunk); });
-                        fileRes.on('end', () => {
-                            resolve(Buffer.concat(chunks));
-                        });
-                    }).on('error', reject);
-                } catch (error) {
-                    reject(error);
-                }
-            });
-        }).on('error', reject);
+                });
+            })
+            .on('error', reject);
     });
 }
 
@@ -129,7 +137,7 @@ async function handleTelegramUpdate(update, onImageReceived = null, onTextReceiv
         if (message.photo && message.photo.length > 0) {
             // Get largest photo (best quality)
             const photo = message.photo.reduce((prev, current) => {
-                return (prev.file_size > current.file_size) ? prev : current;
+                return prev.file_size > current.file_size ? prev : current;
             });
 
             console.log(`[Telegram] Processing photo from user ${message.from?.id} (file_id: ${photo.file_id.slice(0, 20)}...)`);
@@ -214,18 +222,23 @@ async function sendTelegramMessage(chatId, text) {
             },
         };
 
-        https.request(url, options, res => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(data);
-                    resolve(json.ok);
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        }).on('error', reject).end(postData);
+        https
+            .request(url, options, res => {
+                let data = '';
+                res.on('data', chunk => {
+                    data += chunk;
+                });
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        resolve(json.ok);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            })
+            .on('error', reject)
+            .end(postData);
     });
 }
 
@@ -240,40 +253,44 @@ async function pollTelegramUpdates(onImageReceived = null, onTextReceived = null
         return;
     }
 
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
         try {
             const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${updateOffset}&timeout=5`;
 
-            https.get(url, res => {
-                let data = '';
-                res.on('data', chunk => { data += chunk; });
-                res.on('end', async () => {
-                    try {
-                        const json = JSON.parse(data);
-                        if (!json.ok) {
-                            logTelegramPollConflict(json.description);
-                            resolve();
-                            return;
-                        }
-
-                        const updates = json.result || [];
-                        if (updates.length > 0) {
-                            console.log('[Telegram] Received', updates.length, 'update(s)');
-
-                            for (const update of updates) {
-                                await handleTelegramUpdate(update, onImageReceived, onTextReceived);
-                                updateOffset = Math.max(updateOffset, update.update_id + 1);
+            https
+                .get(url, res => {
+                    let data = '';
+                    res.on('data', chunk => {
+                        data += chunk;
+                    });
+                    res.on('end', async () => {
+                        try {
+                            const json = JSON.parse(data);
+                            if (!json.ok) {
+                                logTelegramPollConflict(json.description);
+                                resolve();
+                                return;
                             }
+
+                            const updates = json.result || [];
+                            if (updates.length > 0) {
+                                console.log('[Telegram] Received', updates.length, 'update(s)');
+
+                                for (const update of updates) {
+                                    await handleTelegramUpdate(update, onImageReceived, onTextReceived);
+                                    updateOffset = Math.max(updateOffset, update.update_id + 1);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('[Telegram] Poll parse error:', error.message);
                         }
-                    } catch (error) {
-                        console.error('[Telegram] Poll parse error:', error.message);
-                    }
+                        resolve();
+                    });
+                })
+                .on('error', error => {
+                    console.error('[Telegram] Poll request error:', error.message);
                     resolve();
                 });
-            }).on('error', error => {
-                console.error('[Telegram] Poll request error:', error.message);
-                resolve();
-            });
         } catch (error) {
             console.error('[Telegram] Poll error:', error.message);
             resolve();
@@ -305,9 +322,9 @@ function startPolling(pollIntervalMs = 2000, onImageReceived = null, onTextRecei
     // So we add delay AFTER the request completes to avoid conflicts
     const recursivePoll = async () => {
         if (!pollingActive) return; // Stop if polling was stopped
-        
+
         await pollTelegramUpdates(onImageReceived, onTextReceived);
-        
+
         // Schedule next poll after previous completes
         pollingTimer = setTimeout(recursivePoll, pollIntervalMs);
     };

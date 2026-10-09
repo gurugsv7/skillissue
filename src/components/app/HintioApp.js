@@ -26,36 +26,41 @@ export class HintioApp extends LitElement {
         /* ── Animations ── */
 
         @keyframes status-pulse {
-            0%,100% { opacity: 1; }
-            50%      { opacity: 0.4; }
+            0%,
+            100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.4;
+            }
         }
 
         /* ── Host — re-declare all tokens so shadow DOM can resolve them ── */
 
         :host {
-            --accent:         #6366F1;
-            --accent-hover:   #4F46E5;
-            --accent-glow:    rgba(99, 102, 241, 0.25);
-            --bg-app:         #09090B;
-            --bg-surface:     #0F0F12;
-            --bg-elevated:    #18181B;
-            --bg-hover:       #1E1E24;
-            --text-primary:   #FAFAFA;
-            --text-secondary: #A1A1AA;
-            --text-muted:     #52525B;
-            --border:         #27272A;
-            --border-strong:  #3F3F46;
-            --success:        #22C55E;
-            --warning:        #F59E0B;
-            --danger:         #EF4444;
-            --radius-sm:      6px;
-            --radius-md:      10px;
-            --radius-lg:      16px;
-            --transition:     160ms ease;
-            --font:           'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-            --font-mono:      'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
-            --font-size-xs:   11px;
-            --font-size-sm:   13px;
+            --accent: #6366f1;
+            --accent-hover: #4f46e5;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --bg-app: #09090b;
+            --bg-surface: #0f0f12;
+            --bg-elevated: #18181b;
+            --bg-hover: #1e1e24;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #52525b;
+            --border: #27272a;
+            --border-strong: #3f3f46;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+            --transition: 160ms ease;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+            --font-mono: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+            --font-size-xs: 11px;
+            --font-size-sm: 13px;
             --font-size-base: 14px;
 
             display: block;
@@ -110,7 +115,7 @@ export class HintioApp extends LitElement {
             width: 26px;
             height: 26px;
             border-radius: 7px;
-            background: #6366F1;
+            background: #6366f1;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -119,7 +124,9 @@ export class HintioApp extends LitElement {
             color: #fff;
             letter-spacing: -0.03em;
             flex-shrink: 0;
-            box-shadow: 0 0 0 1px rgba(99,102,241,0.5), 0 2px 8px rgba(99,102,241,0.3);
+            box-shadow:
+                0 0 0 1px rgba(99, 102, 241, 0.5),
+                0 2px 8px rgba(99, 102, 241, 0.3);
         }
 
         .nav-brand-name {
@@ -159,7 +166,9 @@ export class HintioApp extends LitElement {
             font-size: 12px;
             font-weight: 500;
             cursor: pointer;
-            transition: color var(--transition), background var(--transition);
+            transition:
+                color var(--transition),
+                background var(--transition);
             white-space: nowrap;
             position: relative;
         }
@@ -171,12 +180,20 @@ export class HintioApp extends LitElement {
             font-weight: normal;
             font-style: normal;
             line-height: 1;
-            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+            font-variation-settings:
+                'FILL' 0,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 20;
             flex-shrink: 0;
         }
 
         .nav-item.active .icon {
-            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+            font-variation-settings:
+                'FILL' 1,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 20;
         }
 
         .nav-item:hover {
@@ -197,7 +214,7 @@ export class HintioApp extends LitElement {
             transform: translateX(-50%);
             width: 20px;
             height: 2px;
-            background: #6366F1;
+            background: #6366f1;
             border-radius: 2px 2px 0 0;
         }
 
@@ -235,7 +252,7 @@ export class HintioApp extends LitElement {
         }
 
         .wc-btn.minimize {
-            color: rgba(255,255,255,0.3);
+            color: rgba(255, 255, 255, 0.3);
         }
 
         .wc-btn.minimize:hover {
@@ -245,13 +262,13 @@ export class HintioApp extends LitElement {
         }
 
         .wc-btn.close {
-            color: rgba(255,255,255,0.3);
+            color: rgba(255, 255, 255, 0.3);
         }
 
         .wc-btn.close:hover {
             color: #ff5f57;
-            border-color: rgba(239,68,68,0.5);
-            background: rgba(239,68,68,0.1);
+            border-color: rgba(239, 68, 68, 0.5);
+            background: rgba(239, 68, 68, 0.1);
         }
 
         .update-dot {
@@ -259,7 +276,7 @@ export class HintioApp extends LitElement {
             height: 6px;
             border-radius: 50%;
             background: var(--danger);
-            box-shadow: 0 0 6px rgba(239,68,68,0.7);
+            box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
             animation: status-pulse 2s ease-in-out infinite;
         }
 
@@ -280,8 +297,8 @@ export class HintioApp extends LitElement {
             align-items: center;
             justify-content: space-between;
             padding: 0 16px;
-            background: rgba(8,8,10,0.96);
-            border-bottom: 1px solid rgba(0,212,255,0.12);
+            background: rgba(8, 8, 10, 0.96);
+            border-bottom: 1px solid rgba(0, 212, 255, 0.12);
             height: 34px;
             -webkit-app-region: drag;
             flex-shrink: 0;
@@ -315,8 +332,8 @@ export class HintioApp extends LitElement {
 
         .live-bar-back:hover {
             color: var(--danger);
-            border-color: rgba(239,68,68,0.5);
-            background: rgba(239,68,68,0.08);
+            border-color: rgba(239, 68, 68, 0.5);
+            background: rgba(239, 68, 68, 0.08);
         }
 
         .live-bar-back svg {
@@ -350,14 +367,14 @@ export class HintioApp extends LitElement {
             height: 5px;
             border-radius: 50%;
             background: var(--success);
-            box-shadow: 0 0 6px rgba(34,197,94,0.6);
+            box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
             animation: status-pulse 2s ease-in-out infinite;
         }
 
         .live-session-label {
             font-size: 10px;
             font-family: var(--font-mono);
-            color: rgba(34,197,94,0.7);
+            color: rgba(34, 197, 94, 0.7);
             letter-spacing: 0.08em;
             text-transform: uppercase;
         }
@@ -432,14 +449,19 @@ export class HintioApp extends LitElement {
 
         /* ── Scrollbar ── */
 
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
         ::-webkit-scrollbar-thumb {
             background: var(--border-strong);
             border-radius: 2px;
         }
         ::-webkit-scrollbar-thumb:hover {
-            background: #52525B;
+            background: #52525b;
         }
     `;
 
@@ -560,14 +582,18 @@ export class HintioApp extends LitElement {
     connectedCallback() {
         super.connectedCallback();
 
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             ipcRenderer.on('new-response', (_, response) => this.addNewResponse(response));
             ipcRenderer.on('update-response', (_, response) => this.updateCurrentResponse(response));
             ipcRenderer.on('update-status', (_, status) => this.setStatus(status));
-            ipcRenderer.on('click-through-toggled', (_, isEnabled) => { this._isClickThrough = isEnabled; });
+            ipcRenderer.on('click-through-toggled', (_, isEnabled) => {
+                this._isClickThrough = isEnabled;
+            });
             ipcRenderer.on('reconnect-failed', (_, data) => this.addNewResponse(data.message));
-            ipcRenderer.on('whisper-downloading', (_, downloading) => { this._whisperDownloading = downloading; });
+            ipcRenderer.on('whisper-downloading', (_, downloading) => {
+                this._whisperDownloading = downloading;
+            });
             ipcRenderer.on('screen-analysis-triggered', () => {
                 this._awaitingScreenAnalysis = true;
                 this._screenAnalysisMode = 'manual';
@@ -580,8 +606,8 @@ export class HintioApp extends LitElement {
     disconnectedCallback() {
         super.disconnectedCallback();
         this._stopTimer();
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             ipcRenderer.removeAllListeners('new-response');
             ipcRenderer.removeAllListeners('update-response');
             ipcRenderer.removeAllListeners('update-status');
@@ -598,7 +624,7 @@ export class HintioApp extends LitElement {
         if (this.startTime) {
             this._timerInterval = setInterval(() => {
                 if (this.currentView === 'assistant' && this._isSessionTimedOut()) {
-                    this._handleSessionTimeout().catch((error) => {
+                    this._handleSessionTimeout().catch(error => {
                         console.error('Session timeout handling failed:', error);
                     });
                     return;
@@ -637,9 +663,7 @@ export class HintioApp extends LitElement {
         const sessionLimitMs = this._getActiveSessionLimitMs();
         if (!sessionLimitMs) return '';
 
-        const remainingMs = this.startTime
-            ? Math.max(0, sessionLimitMs - (Date.now() - this.startTime))
-            : sessionLimitMs;
+        const remainingMs = this.startTime ? Math.max(0, sessionLimitMs - (Date.now() - this.startTime)) : sessionLimitMs;
         const remainingSeconds = Math.floor(remainingMs / 1000);
         const minutes = Math.floor(remainingSeconds / 60);
         const seconds = remainingSeconds % 60;
@@ -669,7 +693,7 @@ export class HintioApp extends LitElement {
         if (wasOnLatest || this.currentResponseIndex === -1) {
             this.currentResponseIndex = this.responses.length - 1;
         }
-        
+
         this._awaitingNewResponse = false;
         this.requestUpdate();
     }
@@ -730,8 +754,8 @@ export class HintioApp extends LitElement {
 
     async _endSessionToHome() {
         hintio.stopCapture();
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             await ipcRenderer.invoke('close-session');
         }
         if (window.hintio?.clearSessionProviderSecrets) {
@@ -775,23 +799,23 @@ export class HintioApp extends LitElement {
             // Go back to main from calibration
             this.currentView = 'main';
         } else {
-            if (window.require) {
-                const { ipcRenderer } = window.require('electron');
+            if (window.electronAPI) {
+                const ipcRenderer = window.electronAPI;
                 await ipcRenderer.invoke('quit-application');
             }
         }
     }
 
     async _handleMinimize() {
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             await ipcRenderer.invoke('window-minimize');
         }
     }
 
     async handleHideToggle() {
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             await ipcRenderer.invoke('toggle-window-visibility');
         }
     }
@@ -827,7 +851,7 @@ export class HintioApp extends LitElement {
 
     async handleCalibrationSkip() {
         this._calibrationSkipped = true;
-        hintio.storage.updatePreference('skipVoiceCalibration', true).catch((error) => {
+        hintio.storage.updatePreference('skipVoiceCalibration', true).catch(error => {
             console.warn('Failed to persist skipVoiceCalibration preference:', error);
         });
         // Navigate to main first so main-view is in the DOM before _startSession()
@@ -876,7 +900,7 @@ export class HintioApp extends LitElement {
             return;
         }
 
-        const success = await hintio.initializeAzure(this.selectedProfile, this.selectedLanguage);
+        const success = await hintio.initializeGemini(this.selectedProfile, this.selectedLanguage);
         if (!success) {
             const initError = typeof hintio.getLastInitError === 'function' ? hintio.getLastInitError() : '';
             this._showMainViewTokenError(initError || 'Access token is invalid or expired.');
@@ -887,9 +911,8 @@ export class HintioApp extends LitElement {
         this.responses = [];
         this.currentResponseIndex = -1;
         this.startTime = Date.now();
-        this.sessionLimitMs = (typeof hintio.getSessionLimitMs === 'function')
-            ? (hintio.getSessionLimitMs() ?? null)
-            : HintioApp.DEFAULT_SESSION_LIMIT_MS;
+        this.sessionLimitMs =
+            typeof hintio.getSessionLimitMs === 'function' ? (hintio.getSessionLimitMs() ?? null) : HintioApp.DEFAULT_SESSION_LIMIT_MS;
         this._sessionTimeoutHandled = false;
         this.sessionActive = true;
         this.currentView = 'assistant';
@@ -897,15 +920,15 @@ export class HintioApp extends LitElement {
     }
 
     async handleAPIKeyHelp() {
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             await ipcRenderer.invoke('open-external', 'https://hintio.com/help/api-key');
         }
     }
 
     async handleGroqAPIKeyHelp() {
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             await ipcRenderer.invoke('open-external', 'https://console.groq.com/keys');
         }
     }
@@ -935,9 +958,9 @@ export class HintioApp extends LitElement {
     async handleLayoutModeChange(layoutMode) {
         this.layoutMode = layoutMode;
         await hintio.storage.updateConfig('layout', layoutMode);
-        if (window.require) {
+        if (window.electronAPI) {
             try {
-                const { ipcRenderer } = window.require('electron');
+                const ipcRenderer = window.electronAPI;
                 await ipcRenderer.invoke('update-sizes');
             } catch (error) {
                 console.error('Failed to update sizes:', error);
@@ -947,8 +970,8 @@ export class HintioApp extends LitElement {
     }
 
     async handleExternalLinkClick(url) {
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             await ipcRenderer.invoke('open-external', url);
         }
     }
@@ -984,8 +1007,8 @@ export class HintioApp extends LitElement {
     updated(changedProperties) {
         super.updated(changedProperties);
 
-        if (changedProperties.has('currentView') && window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (changedProperties.has('currentView') && window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             ipcRenderer.send('view-changed', this.currentView);
         }
     }
@@ -1002,10 +1025,7 @@ export class HintioApp extends LitElement {
         switch (this.currentView) {
             case 'onboarding':
                 return html`
-                    <onboarding-view
-                        .onComplete=${() => this.handleOnboardingComplete()}
-                        .onClose=${() => this.handleClose()}
-                    ></onboarding-view>
+                    <onboarding-view .onComplete=${() => this.handleOnboardingComplete()} .onClose=${() => this.handleClose()}></onboarding-view>
                 `;
 
             case 'main':
@@ -1018,7 +1038,10 @@ export class HintioApp extends LitElement {
                         .whisperDownloading=${this._whisperDownloading}
                         .hasVoiceProfile=${this._hasVoiceProfile}
                         .onResetVoiceProfile=${() => this.handleResetVoiceProfile()}
-                        .onRecalibrate=${() => { this.currentView = 'calibration'; this.requestUpdate(); }}
+                        .onRecalibrate=${() => {
+                            this.currentView = 'calibration';
+                            this.requestUpdate();
+                        }}
                     ></main-view>
                 `;
 
@@ -1026,7 +1049,7 @@ export class HintioApp extends LitElement {
                 return html`
                     <calibration-view
                         .language=${this.selectedLanguage}
-                        .onComplete=${(profile) => this.handleCalibrationComplete(profile)}
+                        .onComplete=${profile => this.handleCalibrationComplete(profile)}
                         .onSkip=${() => this.handleCalibrationSkip()}
                     ></calibration-view>
                 `;
@@ -1141,12 +1164,13 @@ export class HintioApp extends LitElement {
 
                 <!-- Nav items -->
                 <nav class="nav-items">
-                    ${items.map(item => html`
-                        <button
-                            class="nav-item ${this.currentView === item.id ? 'active' : ''}"
-                            @click=${() => this.navigate(item.id)}
-                        >${item.icon}${item.label}</button>
-                    `)}
+                    ${items.map(
+                        item => html`
+                            <button class="nav-item ${this.currentView === item.id ? 'active' : ''}" @click=${() => this.navigate(item.id)}>
+                                ${item.icon}${item.label}
+                            </button>
+                        `
+                    )}
                 </nav>
 
                 <div class="nav-drag-spacer" aria-hidden="true"></div>
@@ -1184,9 +1208,7 @@ export class HintioApp extends LitElement {
         return html`
             <div class="live-bar">
                 <div class="live-bar-left">
-                    <button class="live-bar-back" @click=${() => this.handleClose()} title="End session">
-                        ← END
-                    </button>
+                    <button class="live-bar-back" @click=${() => this.handleClose()} title="End session">← END</button>
                     <span class="live-profile-tag">${profileLabels[this.selectedProfile] || 'Session'}</span>
                 </div>
                 <div class="live-bar-center">
@@ -1207,11 +1229,7 @@ export class HintioApp extends LitElement {
     render() {
         // Onboarding is fullscreen, no nav
         if (this.currentView === 'onboarding') {
-            return html`
-                <div class="fullscreen">
-                    ${this.renderCurrentView()}
-                </div>
-            `;
+            return html` <div class="fullscreen">${this.renderCurrentView()}</div> `;
         }
 
         const isLive = this._isLiveMode();
@@ -1225,8 +1243,7 @@ export class HintioApp extends LitElement {
                 <div class="content">
                     ${isLive ? this.renderLiveBar() : ''}
                     <div class="content-inner ${isLive ? 'live' : ''}">
-                        ${this.renderCurrentView()}
-                        ${showResizeHandles ? html`<resize-handles></resize-handles>` : ''}
+                        ${this.renderCurrentView()} ${showResizeHandles ? html`<resize-handles></resize-handles>` : ''}
                     </div>
                 </div>
             </div>

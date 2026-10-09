@@ -12,7 +12,7 @@ This PRD reflects the **current shipped behavior in the codebase** (v0.7.0), inc
 
 ### Goals
 - Deliver real-time assistive responses with low interaction friction.
-- Support multiple AI backends (Cloud, Gemini, Groq, Azure, Local/Ollama).
+- Support multiple AI backends (Cloud, Gemini free tier, Groq, Local/Ollama).
 - Keep user context persistent across sessions (profiles, prompts, resume text, keybinds, history).
 - Provide coding-answer quality guardrail via a delayed verification pass.
 - Enable stealth overlay operation with keyboard-first control.
@@ -53,7 +53,7 @@ This PRD reflects the **current shipped behavior in the codebase** (v0.7.0), inc
 
 ## 4.4 Post-Answer Coding Self-Heal
 - If content appears coding-related, a delayed verification pass runs after draft response generation.
-- Current implementation delay is ~1 second (`setTimeout(..., 1000)`), then candidate response is re-checked/fixed via Groq/Azure verifier when available.
+- Current implementation delay is ~1 second (`setTimeout(..., 1000)`), then candidate response is re-checked/fixed via Groq/Gemini verifier when available.
 - Updated response replaces the latest assistant output if improved.
 
 ## 4.5 Session End
@@ -71,7 +71,7 @@ This PRD reflects the **current shipped behavior in the codebase** (v0.7.0), inc
 
 ### FR-2: Multi-Provider Runtime
 - Provider modes: Cloud, BYOK, Local.
-- Backends: cloud websocket, Gemini, Groq, Azure OpenAI, Ollama local.
+- Backends: OpenAI (primary), Gemini (fallback), cloud websocket, Groq, Ollama local. OpenAI and Gemini share one provider layer.
 - Provider secret resolution flow for cloud token usage.
 
 ### FR-3: Audio + Screen Context Ingestion
@@ -169,6 +169,9 @@ This PRD reflects the **current shipped behavior in the codebase** (v0.7.0), inc
 - `src/utils/cloud.js` — websocket cloud transport.
 - `src/utils/speechStt.js` — Whisper/Groq STT path.
 - `src/utils/azureStt.js` — Azure speech recognition path.
+- `src/utils/llmProvider.js` — provider registry (OpenAI, Gemini) and the request path: key failover -> model fallback -> provider fallback.
+- `src/utils/llmKeyPool.js` — per-key rate-window tracking with proactive spreading and instant 429 failover.
+- `src/utils/interviewProfiles.js` — domain-agnostic interview support: question-type classification, per-type answer shapes, and the live prompt builder. Interview subject matter comes from the user's `interviewDomain` preference, never from hardcoded field assumptions.
 - `src/utils/localai.js` — Ollama + local model support.
 
 ## 7.6 Storage Layer

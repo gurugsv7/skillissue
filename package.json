@@ -12,7 +12,9 @@
         "make": "electron-forge make",
         "make:win": "electron-forge make --platform=win32 --arch=x64 && npm run verify:win-package",
         "publish": "electron-forge publish",
-        "lint": "echo \"No linting configured\""
+        "lint": "echo \"No linting configured\"",
+        "test": "node --test test/*.test.js",
+        "typecheck": "node scripts/check-syntax.js"
     },
     "keywords": [
         "Hintio",
@@ -51,5 +53,10 @@
         "@electron/fuses": "^1.8.0",
         "@reforged/maker-appimage": "^5.0.0",
         "electron": "^30.0.5"
+    },
+    "overrides": {
+        "gaxios": {
+            "uuid": "^11.1.1"
+        }
     }
 }

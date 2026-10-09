@@ -56,12 +56,22 @@ export class AssistantView extends LitElement {
             letter-spacing: -0.01em;
         }
 
-        .response-container h1 { font-size: 1.5em; }
-        .response-container h2 { font-size: 1.3em; }
-        .response-container h3 { font-size: 1.15em; }
-        .response-container h4 { font-size: 1.05em; }
+        .response-container h1 {
+            font-size: 1.5em;
+        }
+        .response-container h2 {
+            font-size: 1.3em;
+        }
+        .response-container h3 {
+            font-size: 1.15em;
+        }
+        .response-container h4 {
+            font-size: 1.05em;
+        }
         .response-container h5,
-        .response-container h6 { font-size: 1em; }
+        .response-container h6 {
+            font-size: 1em;
+        }
 
         .response-container p {
             margin: 0.6em 0;
@@ -152,7 +162,10 @@ export class AssistantView extends LitElement {
             font-size: 11px;
             padding: 3px 10px;
             border-radius: 6px;
-            transition: color 0.15s, border-color 0.15s, background 0.15s;
+            transition:
+                color 0.15s,
+                border-color 0.15s,
+                background 0.15s;
             display: flex;
             align-items: center;
             gap: 5px;
@@ -281,7 +294,11 @@ export class AssistantView extends LitElement {
             font-weight: normal;
             font-style: normal;
             line-height: 1;
-            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+            font-variation-settings:
+                'FILL' 1,
+                'wght' 400,
+                'GRAD' 0,
+                'opsz' 20;
             flex-shrink: 0;
             display: inline-flex;
             align-items: center;
@@ -373,7 +390,9 @@ export class AssistantView extends LitElement {
             display: flex;
             align-items: center;
             gap: 4px;
-            transition: border-color 0.4s ease, background var(--transition);
+            transition:
+                border-color 0.4s ease,
+                background var(--transition);
             flex-shrink: 0;
             overflow: hidden;
         }
@@ -467,7 +486,9 @@ export class AssistantView extends LitElement {
             border-radius: 4px;
             display: flex;
             align-items: center;
-            transition: color 0.15s, background 0.15s;
+            transition:
+                color 0.15s,
+                background 0.15s;
         }
 
         .error-panel-close:hover {
@@ -540,6 +561,9 @@ export class AssistantView extends LitElement {
     getProfileNames() {
         return {
             interview: 'Job Interview',
+            'technical-interview': 'Technical Interview',
+            // Retired id — kept so older saved sessions still show a label.
+            'frontend-interview': 'Technical Interview',
             sales: 'Sales Call',
             meeting: 'Business Meeting',
             presentation: 'Presentation',
@@ -579,13 +603,37 @@ export class AssistantView extends LitElement {
         const parser = new DOMParser();
         const doc = parser.parseFromString(String(rawHtml || ''), 'text/html');
         const allowedTags = new Set([
-            'P', 'BR', 'STRONG', 'B', 'EM', 'I', 'CODE', 'PRE',
-            'UL', 'OL', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
-            'BLOCKQUOTE', 'HR', 'A', 'TABLE', 'THEAD', 'TBODY',
-            'TR', 'TH', 'TD', 'SPAN', 'DIV',
+            'P',
+            'BR',
+            'STRONG',
+            'B',
+            'EM',
+            'I',
+            'CODE',
+            'PRE',
+            'UL',
+            'OL',
+            'LI',
+            'H1',
+            'H2',
+            'H3',
+            'H4',
+            'H5',
+            'H6',
+            'BLOCKQUOTE',
+            'HR',
+            'A',
+            'TABLE',
+            'THEAD',
+            'TBODY',
+            'TR',
+            'TH',
+            'TD',
+            'SPAN',
+            'DIV',
         ]);
 
-        const removeNodeButKeepChildren = (node) => {
+        const removeNodeButKeepChildren = node => {
             const parent = node.parentNode;
             if (!parent) return;
             while (node.firstChild) {
@@ -594,7 +642,7 @@ export class AssistantView extends LitElement {
             parent.removeChild(node);
         };
 
-        const sanitizeNode = (node) => {
+        const sanitizeNode = node => {
             if (node.nodeType === Node.ELEMENT_NODE) {
                 const tag = node.tagName;
 
@@ -713,8 +761,8 @@ export class AssistantView extends LitElement {
     connectedCallback() {
         super.connectedCallback();
 
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
 
             this.handlePreviousResponse = () => this.navigateToPreviousResponse();
             this.handleNextResponse = () => this.navigateToNextResponse();
@@ -732,8 +780,8 @@ export class AssistantView extends LitElement {
         super.disconnectedCallback();
         this._stopWaveformAnimation();
 
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             if (this.handlePreviousResponse) ipcRenderer.removeListener('navigate-previous-response', this.handlePreviousResponse);
             if (this.handleNextResponse) ipcRenderer.removeListener('navigate-next-response', this.handleNextResponse);
             if (this.handleScrollUp) ipcRenderer.removeListener('scroll-response-up', this.handleScrollUp);
@@ -814,7 +862,7 @@ export class AssistantView extends LitElement {
         const perimeter = 2 * straightLen + 2 * arcLen;
 
         // Given a distance along the perimeter, return {x, y, nx, ny} (position + inward normal)
-        const pointOnPerimeter = (d) => {
+        const pointOnPerimeter = d => {
             d = ((d % perimeter) + perimeter) % perimeter;
             // Top straight: left to right
             if (d < straightLen) {
@@ -853,7 +901,7 @@ export class AssistantView extends LitElement {
             seeds.push({ pos: Math.random(), drift: Math.random(), depthSeed: Math.random() });
         }
 
-        const draw = (now) => {
+        const draw = now => {
             const elapsed = (now - startTime) / 1000;
             const fade = Math.min(1, elapsed / FADE_IN);
 
@@ -958,7 +1006,6 @@ export class AssistantView extends LitElement {
                 this.isAnalyzing = false;
             }
         }
-
     }
 
     updateResponseContent() {
@@ -998,7 +1045,7 @@ export class AssistantView extends LitElement {
 
     _postProcessCodeBlocks(container) {
         const preBlocks = container.querySelectorAll('pre');
-        preBlocks.forEach((pre) => {
+        preBlocks.forEach(pre => {
             if (pre.closest('.code-block-wrapper')) return; // already processed
 
             const code = pre.querySelector('code');
@@ -1012,9 +1059,13 @@ export class AssistantView extends LitElement {
 
             // Apply highlight.js if available
             if (code && window.hljs && lang) {
-                try { window.hljs.highlightElement(code); } catch(e) {}
+                try {
+                    window.hljs.highlightElement(code);
+                } catch (e) {}
             } else if (code && window.hljs && !lang) {
-                try { window.hljs.highlightElement(code); } catch(e) {}
+                try {
+                    window.hljs.highlightElement(code);
+                } catch (e) {}
             }
 
             // Build wrapper
@@ -1033,14 +1084,17 @@ export class AssistantView extends LitElement {
             copyBtn.innerHTML = `<span class="icon" style="font-size:14px;margin-right:2px">content_copy</span>copy`;
             copyBtn.addEventListener('click', () => {
                 const text = code ? code.innerText : pre.innerText;
-                navigator.clipboard.writeText(text).then(() => {
-                    copyBtn.textContent = 'copied!';
-                    copyBtn.classList.add('copied');
-                    setTimeout(() => {
-                        copyBtn.innerHTML = `<span class="icon" style="font-size:14px;margin-right:2px">content_copy</span>copy`;
-                        copyBtn.classList.remove('copied');
-                    }, 2000);
-                }).catch(() => {});
+                navigator.clipboard
+                    .writeText(text)
+                    .then(() => {
+                        copyBtn.textContent = 'copied!';
+                        copyBtn.classList.add('copied');
+                        setTimeout(() => {
+                            copyBtn.innerHTML = `<span class="icon" style="font-size:14px;margin-right:2px">content_copy</span>copy`;
+                            copyBtn.classList.remove('copied');
+                        }, 2000);
+                    })
+                    .catch(() => {});
             });
 
             header.appendChild(langLabel);
@@ -1059,27 +1113,35 @@ export class AssistantView extends LitElement {
             <div class="response-container" id="responseContainer"></div>
 
             ${this._renderErrorPanel()}
-
-            ${hasMultipleResponses ? html`
-                <div class="response-nav">
-                    <button class="nav-btn" @click=${this.navigateToPreviousResponse} ?disabled=${this.currentResponseIndex <= 0} title="Previous response">
-                        <span class="icon">chevron_left</span>
-                    </button>
-                    <span class="response-counter">${this.currentResponseIndex + 1} of ${this.responses.length}</span>
-                    <button class="nav-btn" @click=${this.navigateToNextResponse} ?disabled=${this.currentResponseIndex >= this.responses.length - 1} title="Next response">
-                        <span class="icon">chevron_right</span>
-                    </button>
-                </div>
-            ` : ''}
+            ${
+                hasMultipleResponses
+                    ? html`
+                          <div class="response-nav">
+                              <button
+                                  class="nav-btn"
+                                  @click=${this.navigateToPreviousResponse}
+                                  ?disabled=${this.currentResponseIndex <= 0}
+                                  title="Previous response"
+                              >
+                                  <span class="icon">chevron_left</span>
+                              </button>
+                              <span class="response-counter">${this.currentResponseIndex + 1} of ${this.responses.length}</span>
+                              <button
+                                  class="nav-btn"
+                                  @click=${this.navigateToNextResponse}
+                                  ?disabled=${this.currentResponseIndex >= this.responses.length - 1}
+                                  title="Next response"
+                              >
+                                  <span class="icon">chevron_right</span>
+                              </button>
+                          </div>
+                      `
+                    : ''
+            }
 
             <div class="input-bar ${this._inputExpanded ? 'expanded' : ''}">
                 <div class="input-bar-inner">
-                    <input
-                        type="text"
-                        id="textInput"
-                        placeholder="Type a message..."
-                        @keydown=${this.handleTextKeydown}
-                    />
+                    <input type="text" id="textInput" placeholder="Type a message..." @keydown=${this.handleTextKeydown} />
                 </div>
                 <button class="analyze-btn ${this.isAnalyzing ? 'analyzing' : ''}" @click=${this.handleScreenAnswer}>
                     <canvas class="analyze-canvas"></canvas>

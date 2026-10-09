@@ -4,7 +4,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-runtime-secret',
+    'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-intent, x-runtime-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -28,6 +28,44 @@ type RequestPayload = {
     consume?: boolean;
 };
 
+// Gemini model the desktop client should use. Free tier covers the Flash /
+// Flash-Lite families; gemini-3.7-flash is the latest stable Flash.
+const MANAGED_GEMINI_MODEL = (Deno.env.get('HINTIO_MANAGED_GEMINI_MODEL') ?? '').trim() || 'gemini-3.7-flash';
+
+// Extra Gemini keys, comma/whitespace separated. Each free-tier key is ~10
+// requests/minute, so issuing several from separate accounts lets the client
+// spread load and fail over instantly instead of stalling on a 429.
+const MANAGED_GEMINI_EXTRA_KEYS = (Deno.env.get('HINTIO_MANAGED_GEMINI_API_KEYS') ?? '').trim();
+
+// OpenAI is the primary LLM. Comma-separate several keys to raise the ceiling —
+// the client spreads load across them and fails over instantly on a 429.
+const MANAGED_OPENAI_KEYS = (Deno.env.get('HINTIO_MANAGED_OPENAI_API_KEYS') ?? Deno.env.get('HINTIO_MANAGED_OPENAI_API_KEY') ?? '').trim();
+const MANAGED_OPENAI_MODEL = (Deno.env.get('HINTIO_MANAGED_OPENAI_MODEL') ?? '').trim() || 'gpt-5.6-luna';
+
+function splitKeys(raw: string): string[] {
+    const seen = new Set<string>();
+    const keys: string[] = [];
+    for (const candidate of raw.split(/[\s,;]+/)) {
+        const key = candidate.trim();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        keys.push(key);
+    }
+    return keys;
+}
+
+function buildGeminiKeyList(rowKey: string): string[] {
+    const seen = new Set<string>();
+    const keys: string[] = [];
+    for (const candidate of [rowKey, MANAGED_GEMINI_EXTRA_KEYS].join(',').split(/[\s,;]+/)) {
+        const key = candidate.trim();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        keys.push(key);
+    }
+    return keys;
+}
+
 const ACCESS_TOKEN_REGEX = /^SKI-[A-Za-z0-9_-]{20,252}$/;
 const GENERIC_ACCESS_TOKEN_REGEX = /^[A-Za-z0-9_-]{6,256}$/;
 
@@ -46,7 +84,7 @@ async function sha256Hex(value: string): Promise<string> {
     const encoded = new TextEncoder().encode(value);
     const digestBuffer = await crypto.subtle.digest('SHA-256', encoded);
     return Array.from(new Uint8Array(digestBuffer))
-        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
 }
 
@@ -90,10 +128,7 @@ Deno.serve(async (req: Request) => {
         });
     }
 
-    const isInternalRuntimeRequest =
-        Boolean(expectedRuntimeSecret) &&
-        Boolean(runtimeSecretHeader) &&
-        runtimeSecretHeader === expectedRuntimeSecret;
+    const isInternalRuntimeRequest = Boolean(expectedRuntimeSecret) && Boolean(runtimeSecretHeader) && runtimeSecretHeader === expectedRuntimeSecret;
 
     const clientIntent = (req.headers.get('x-client-intent') ?? '').trim().toLowerCase();
     if (!isInternalRuntimeRequest && clientIntent !== 'desktop-runtime') {
@@ -120,9 +155,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const authHeader = req.headers.get('authorization') ?? '';
-    const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
-        ? authHeader.slice(7).trim()
-        : '';
+    const bearerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
 
     const contentType = (req.headers.get('content-type') ?? '').toLowerCase();
     if (!contentType.includes('application/json')) {
@@ -247,6 +280,10 @@ Deno.serve(async (req: Request) => {
                 tokenId: row.token_id,
                 providerMode: row.provider_mode,
                 geminiApiKey: includeSecrets ? (row.gemini_api_key ?? '') : '',
+                geminiApiKeys: includeSecrets ? buildGeminiKeyList(row.gemini_api_key ?? '') : [],
+                openaiApiKeys: includeSecrets ? splitKeys(MANAGED_OPENAI_KEYS) : [],
+                openaiModel: MANAGED_OPENAI_MODEL,
+                geminiModel: MANAGED_GEMINI_MODEL,
                 groqApiKey: includeSecrets ? (row.groq_api_key ?? '') : '',
                 azureApiKey: includeSecrets ? (row.azure_api_key ?? '') : '',
                 azureEndpoint: includeSecrets ? (row.azure_endpoint ?? '') : '',

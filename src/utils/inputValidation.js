@@ -2,6 +2,7 @@ const path = require('path');
 
 const CONTROL_CHARS_REGEX = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 const BASE64_REGEX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const ACCESS_TOKEN_REGEX = /^[A-Za-z0-9_-]{6,256}$/;
 
 function isPlainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -15,13 +16,7 @@ function ensurePlainObject(value, fieldName = 'value') {
 }
 
 function sanitizeText(value, options = {}) {
-    const {
-        fieldName = 'value',
-        maxLength = 5000,
-        trim = true,
-        allowEmpty = true,
-        multiline = true,
-    } = options;
+    const { fieldName = 'value', maxLength = 5000, trim = true, allowEmpty = true, multiline = true } = options;
 
     if (typeof value !== 'string') {
         throw new Error(`${fieldName} must be a string`);
@@ -97,12 +92,7 @@ function ensureLanguageCode(value, fieldName = 'language') {
 }
 
 function ensureSafeUrl(value, options = {}) {
-    const {
-        fieldName = 'url',
-        protocols = ['https:'],
-        allowLocalhost = false,
-        maxLength = 2048,
-    } = options;
+    const { fieldName = 'url', protocols = ['https:'], allowLocalhost = false, maxLength = 2048 } = options;
 
     const raw = sanitizeText(value, { fieldName, maxLength, multiline: false, allowEmpty: false });
 
@@ -125,11 +115,7 @@ function ensureSafeUrl(value, options = {}) {
 }
 
 function ensureFilePath(value, options = {}) {
-    const {
-        fieldName = 'filePath',
-        allowedExtensions = [],
-        maxLength = 4096,
-    } = options;
+    const { fieldName = 'filePath', allowedExtensions = [], maxLength = 4096 } = options;
 
     const filePath = sanitizeText(value, { fieldName, maxLength, multiline: false, allowEmpty: false });
     if (filePath.includes('\0')) {
@@ -159,11 +145,7 @@ function ensureSafeFilename(value, fallback = 'export.txt') {
 }
 
 function ensureBase64(value, options = {}) {
-    const {
-        fieldName = 'base64Data',
-        minBytes = 1,
-        maxBytes = 8 * 1024 * 1024,
-    } = options;
+    const { fieldName = 'base64Data', minBytes = 1, maxBytes = 8 * 1024 * 1024 } = options;
 
     if (typeof value !== 'string') {
         throw new Error(`${fieldName} must be a base64 string`);
@@ -183,7 +165,25 @@ function ensureBase64(value, options = {}) {
 }
 
 function ensureProfile(value, fieldName = 'profile') {
-    return ensureEnum(value, ['interview', 'sales', 'meeting', 'presentation', 'negotiation', 'exam'], fieldName);
+    return ensureEnum(
+        value,
+        [
+            'interview',
+            'technical-interview',
+            // Retired id — still accepted so previously saved preferences load.
+            'frontend-interview',
+            'sales',
+            'meeting',
+            'presentation',
+            'negotiation',
+            'exam',
+        ],
+        fieldName
+    );
+}
+
+function isValidAccessToken(value) {
+    return typeof value === 'string' && ACCESS_TOKEN_REGEX.test(value);
 }
 
 module.exports = {
@@ -200,4 +200,5 @@ module.exports = {
     ensureSafeFilename,
     ensureBase64,
     ensureProfile,
+    isValidAccessToken,
 };

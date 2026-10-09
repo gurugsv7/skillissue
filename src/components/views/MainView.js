@@ -10,19 +10,19 @@ export class MainView extends LitElement {
 
         /* Re-declare tokens — CSS variables don't auto-inherit into shadow DOM */
         :host {
-            --accent:        #6366F1;
-            --accent-hover:  #4F46E5;
-            --bg-app:        #09090B;
-            --bg-surface:    #0F0F12;
-            --bg-elevated:   #18181B;
-            --text-primary:  #FAFAFA;
-            --text-secondary:#A1A1AA;
-            --text-muted:    #52525B;
-            --border:        #27272A;
-            --border-strong: #3F3F46;
-            --danger:        #EF4444;
-            --radius-sm:     6px;
-            --radius-lg:     16px;
+            --accent: #6366f1;
+            --accent-hover: #4f46e5;
+            --bg-app: #09090b;
+            --bg-surface: #0f0f12;
+            --bg-elevated: #18181b;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #52525b;
+            --border: #27272a;
+            --border-strong: #3f3f46;
+            --danger: #ef4444;
+            --radius-sm: 6px;
+            --radius-lg: 16px;
             --font-weight-semibold: 600;
             --font: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
 
@@ -39,8 +39,14 @@ export class MainView extends LitElement {
         }
 
         @keyframes fade-up {
-            from { opacity: 0; transform: translateY(12px); }
-            to   { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(12px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .card {
@@ -49,7 +55,9 @@ export class MainView extends LitElement {
             border: 1px solid var(--border);
             border-radius: var(--radius-lg);
             background: var(--bg-surface);
-            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.04) inset;
+            box-shadow:
+                0 24px 64px rgba(0, 0, 0, 0.5),
+                0 0 0 1px rgba(255, 255, 255, 0.04) inset;
             padding: 30px 28px;
             display: flex;
             flex-direction: column;
@@ -75,7 +83,7 @@ export class MainView extends LitElement {
             width: 32px;
             height: 32px;
             border-radius: 9px;
-            background: #6366F1;
+            background: #6366f1;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -83,7 +91,9 @@ export class MainView extends LitElement {
             font-weight: 700;
             color: #fff;
             flex-shrink: 0;
-            box-shadow: 0 0 0 1px rgba(99,102,241,0.5), 0 4px 12px rgba(99,102,241,0.4);
+            box-shadow:
+                0 0 0 1px rgba(99, 102, 241, 0.5),
+                0 4px 12px rgba(99, 102, 241, 0.4);
         }
 
         .title {
@@ -131,7 +141,9 @@ export class MainView extends LitElement {
             padding: 10px 12px;
             font-size: 14px;
             font-family: var(--font);
-            transition: border-color 150ms ease, box-shadow 150ms ease;
+            transition:
+                border-color 150ms ease,
+                box-shadow 150ms ease;
         }
 
         input::placeholder {
@@ -151,7 +163,7 @@ export class MainView extends LitElement {
 
         input.error {
             border-color: rgba(239, 68, 68, 0.7);
-            box-shadow: 0 0 0 2px rgba(239,68,68,0.15);
+            box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.15);
         }
 
         .hint {
@@ -183,20 +195,23 @@ export class MainView extends LitElement {
             width: 100%;
             border: none;
             border-radius: var(--radius-sm);
-            background: #6366F1;
+            background: #6366f1;
             color: #ffffff;
             font-size: 14px;
             font-weight: 600;
             padding: 12px 14px;
             cursor: pointer;
-            transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+            transition:
+                background 160ms ease,
+                transform 160ms ease,
+                box-shadow 160ms ease;
             box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
             letter-spacing: -0.01em;
             font-family: var(--font);
         }
 
         .start-button:hover {
-            background: #4F46E5;
+            background: #4f46e5;
             transform: translateY(-1px);
             box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
         }
@@ -362,7 +377,8 @@ export class MainView extends LitElement {
     triggerApiKeyError(message = 'Access token is invalid or expired.') {
         this._tokenErrorMessage = message;
         const normalized = String(message || '').toLowerCase();
-        this._showUpgradeDialog = normalized.includes('usage limit reached') || normalized.includes('interviews used') || normalized.includes('exhausted');
+        this._showUpgradeDialog =
+            normalized.includes('usage limit reached') || normalized.includes('interviews used') || normalized.includes('exhausted');
         this.requestUpdate();
     }
 
@@ -383,42 +399,48 @@ export class MainView extends LitElement {
                     <label class="form-label">Access Token</label>
                     <input
                         type="password"
-                        placeholder="SKI-••••••••••••••••"
+                        placeholder="Enter access token"
                         .value=${this._token}
                         @input=${e => this._saveToken(e.target.value)}
                         class=${this._tokenErrorMessage ? 'error' : ''}
                     />
-                    <div class="hint">Use any valid SKI access token from your generated key list</div>
+                    <div class="hint">Enter a valid access token</div>
                 </div>
 
                 ${this._tokenErrorMessage ? html`<div class="error-alert">${this._tokenErrorMessage}</div>` : ''}
 
                 <div class="actions">
-                    <button class="start-button ${this.isInitializing ? 'disabled' : ''}" @click=${() => this._handleStart()}>
-                        Start Session
-                    </button>
+                    <button class="start-button ${this.isInitializing ? 'disabled' : ''}" @click=${() => this._handleStart()}>Start Session</button>
                 </div>
             </div>
 
-            ${this._showUpgradeDialog
-                ? html`
-                    <div class="modal-backdrop">
-                        <div class="modal-card">
-                            <h2 class="modal-title">Upgrade Required</h2>
-                            <p class="modal-text">
-                                This key is no longer valid. Contact
-                                <a class="contact-number" href="tel:+917448865095">+917448865095</a>
-                                to upgrade to Pro/Lifetime plan.
-                            </p>
-                            <div class="modal-actions">
-                                <button class="start-button" @click=${() => { this._showUpgradeDialog = false; this.requestUpdate(); }}>
-                                    Close
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `
-                : ''}
+            ${
+                this._showUpgradeDialog
+                    ? html`
+                          <div class="modal-backdrop">
+                              <div class="modal-card">
+                                  <h2 class="modal-title">Upgrade Required</h2>
+                                  <p class="modal-text">
+                                      This key is no longer valid. Contact
+                                      <a class="contact-number" href="tel:+917448865095">+917448865095</a>
+                                      to upgrade to Pro/Lifetime plan.
+                                  </p>
+                                  <div class="modal-actions">
+                                      <button
+                                          class="start-button"
+                                          @click=${() => {
+                                    this._showUpgradeDialog = false;
+                                    this.requestUpdate();
+                                }}
+                                      >
+                                          Close
+                                      </button>
+                                  </div>
+                              </div>
+                          </div>
+                      `
+                    : ''
+            }
         `;
     }
 }

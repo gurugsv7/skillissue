@@ -96,3 +96,8 @@ out/
 
 # Supabase generated key dumps
 supabase/generated-access-keys-*.txt
+supabase/.temp/
+
+# Local, per-interview profiles — personal, never committed
+src/profiles/*.local.js
+prep/

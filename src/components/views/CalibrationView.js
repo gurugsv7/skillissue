@@ -7,7 +7,7 @@ import { unifiedPageStyles } from './sharedPageStyles.js';
  * Records the user's voice via MediaRecorder, visualises live mic levels,
  * transcribes each prompt's audio via Groq Whisper (or Azure Speech fallback),
  * then analyses the transcripts through configured providers
- * (Azure first, Groq fallback) to build an observation-only voice profile.
+ * (Gemini first, Groq fallback) to build an observation-only voice profile.
  */
 
 const CALIBRATION_PROMPTS = [
@@ -60,18 +60,33 @@ export class CalibrationView extends LitElement {
         unifiedPageStyles,
         css`
             @keyframes cal-grid-pan {
-                0%   { background-position: 0 0; }
-                100% { background-position: 40px 40px; }
+                0% {
+                    background-position: 0 0;
+                }
+                100% {
+                    background-position: 40px 40px;
+                }
             }
 
             @keyframes cal-fade-up {
-                from { opacity: 0; transform: translateY(10px); }
-                to   { opacity: 1; transform: translateY(0); }
+                from {
+                    opacity: 0;
+                    transform: translateY(10px);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
             }
 
             @keyframes cal-ring-pulse {
-                0%,100% { box-shadow: 0 0 0 0 rgba(0,212,255,0.4); }
-                50%     { box-shadow: 0 0 0 10px rgba(0,212,255,0); }
+                0%,
+                100% {
+                    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.4);
+                }
+                50% {
+                    box-shadow: 0 0 0 10px rgba(0, 212, 255, 0);
+                }
             }
 
             :host {
@@ -91,8 +106,7 @@ export class CalibrationView extends LitElement {
                 overflow-y: auto;
                 position: relative;
                 /* Dot grid */
-                background-image:
-                    radial-gradient(circle, rgba(0,212,255,0.07) 1px, transparent 1px);
+                background-image: radial-gradient(circle, rgba(0, 212, 255, 0.07) 1px, transparent 1px);
                 background-size: 24px 24px;
                 animation: cal-grid-pan 14s linear infinite;
             }
@@ -104,8 +118,8 @@ export class CalibrationView extends LitElement {
                 inset: 0;
                 pointer-events: none;
                 background:
-                    radial-gradient(ellipse 40% 30% at 10% 10%, rgba(0,212,255,0.05) 0%, transparent 70%),
-                    radial-gradient(ellipse 40% 30% at 90% 90%, rgba(127,90,240,0.05) 0%, transparent 70%);
+                    radial-gradient(ellipse 40% 30% at 10% 10%, rgba(0, 212, 255, 0.05) 0%, transparent 70%),
+                    radial-gradient(ellipse 40% 30% at 90% 90%, rgba(127, 90, 240, 0.05) 0%, transparent 70%);
             }
 
             /* ── Header ── */
@@ -128,7 +142,7 @@ export class CalibrationView extends LitElement {
 
             .calibration-subtitle {
                 font-size: var(--font-size-sm);
-                color: rgba(0,212,255,0.5);
+                color: rgba(0, 212, 255, 0.5);
                 line-height: var(--line-height);
                 font-family: var(--font-mono);
             }
@@ -145,7 +159,7 @@ export class CalibrationView extends LitElement {
             .timer-track {
                 flex: 1;
                 height: 3px;
-                background: rgba(0,212,255,0.1);
+                background: rgba(0, 212, 255, 0.1);
                 border-radius: 2px;
                 overflow: hidden;
             }
@@ -155,12 +169,12 @@ export class CalibrationView extends LitElement {
                 background: linear-gradient(90deg, #00d4ff, #7f5af0);
                 border-radius: 2px;
                 transition: width 1s linear;
-                box-shadow: 0 0 8px rgba(0,212,255,0.5);
+                box-shadow: 0 0 8px rgba(0, 212, 255, 0.5);
             }
 
             .timer-text {
                 font-size: var(--font-size-xs);
-                color: rgba(0,212,255,0.6);
+                color: rgba(0, 212, 255, 0.6);
                 font-family: var(--font-mono);
                 white-space: nowrap;
                 min-width: 48px;
@@ -171,9 +185,9 @@ export class CalibrationView extends LitElement {
             .prompt-card {
                 width: 100%;
                 max-width: 520px;
-                border: 1px solid rgba(0,212,255,0.22);
+                border: 1px solid rgba(0, 212, 255, 0.22);
                 border-radius: var(--radius-md);
-                background: rgba(17,17,17,0.88);
+                background: rgba(17, 17, 17, 0.88);
                 backdrop-filter: blur(12px);
                 padding: var(--space-lg);
                 display: flex;
@@ -182,27 +196,33 @@ export class CalibrationView extends LitElement {
                 position: relative;
                 overflow: hidden;
                 animation: cal-fade-up 0.35s ease both;
-                box-shadow: 0 0 20px rgba(0,212,255,0.06), 0 8px 32px rgba(0,0,0,0.4);
+                box-shadow:
+                    0 0 20px rgba(0, 212, 255, 0.06),
+                    0 8px 32px rgba(0, 0, 0, 0.4);
             }
 
             /* Corner accent on prompt card */
             .prompt-card::before {
                 content: '';
                 position: absolute;
-                top: 0; left: 0;
-                width: 24px; height: 24px;
-                border-top: 2px solid rgba(0,212,255,0.5);
-                border-left: 2px solid rgba(0,212,255,0.5);
+                top: 0;
+                left: 0;
+                width: 24px;
+                height: 24px;
+                border-top: 2px solid rgba(0, 212, 255, 0.5);
+                border-left: 2px solid rgba(0, 212, 255, 0.5);
                 border-radius: var(--radius-md) 0 0 0;
             }
 
             .prompt-card::after {
                 content: '';
                 position: absolute;
-                bottom: 0; right: 0;
-                width: 24px; height: 24px;
-                border-bottom: 2px solid rgba(127,90,240,0.4);
-                border-right: 2px solid rgba(127,90,240,0.4);
+                bottom: 0;
+                right: 0;
+                width: 24px;
+                height: 24px;
+                border-bottom: 2px solid rgba(127, 90, 240, 0.4);
+                border-right: 2px solid rgba(127, 90, 240, 0.4);
                 border-radius: 0 0 var(--radius-md) 0;
             }
 
@@ -224,7 +244,7 @@ export class CalibrationView extends LitElement {
 
             .prompt-hint {
                 font-size: var(--font-size-xs);
-                color: rgba(0,212,255,0.4);
+                color: rgba(0, 212, 255, 0.4);
                 font-style: italic;
                 font-family: var(--font-mono);
             }
@@ -243,13 +263,20 @@ export class CalibrationView extends LitElement {
                 height: 8px;
                 border-radius: 50%;
                 background: #ef4444;
-                box-shadow: 0 0 8px rgba(239,68,68,0.6);
+                box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
                 animation: pulse-dot 1.5s ease-in-out infinite;
             }
 
             @keyframes pulse-dot {
-                0%,100% { opacity: 1; box-shadow: 0 0 8px rgba(239,68,68,0.6); }
-                50%     { opacity: 0.3; box-shadow: 0 0 3px rgba(239,68,68,0.2); }
+                0%,
+                100% {
+                    opacity: 1;
+                    box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+                }
+                50% {
+                    opacity: 0.3;
+                    box-shadow: 0 0 3px rgba(239, 68, 68, 0.2);
+                }
             }
 
             /* ── Audio level meter ── */
@@ -263,7 +290,7 @@ export class CalibrationView extends LitElement {
 
             .audio-meter-label {
                 font-size: var(--font-size-xs);
-                color: rgba(0,212,255,0.45);
+                color: rgba(0, 212, 255, 0.45);
                 white-space: nowrap;
                 min-width: 30px;
                 font-family: var(--font-mono);
@@ -275,7 +302,7 @@ export class CalibrationView extends LitElement {
             .audio-meter-track {
                 flex: 1;
                 height: 5px;
-                background: rgba(0,212,255,0.08);
+                background: rgba(0, 212, 255, 0.08);
                 border-radius: 3px;
                 overflow: hidden;
             }
@@ -286,7 +313,7 @@ export class CalibrationView extends LitElement {
                 background: linear-gradient(90deg, #00d4ff 0%, #22c55e 50%, #ef4444 100%);
                 transition: width 0.05s linear;
                 min-width: 0;
-                box-shadow: 0 0 6px rgba(0,212,255,0.4);
+                box-shadow: 0 0 6px rgba(0, 212, 255, 0.4);
             }
 
             /* ── Transcript preview ── */
@@ -296,19 +323,19 @@ export class CalibrationView extends LitElement {
                 min-height: 80px;
                 max-height: 140px;
                 overflow-y: auto;
-                border: 1px solid rgba(0,212,255,0.15);
+                border: 1px solid rgba(0, 212, 255, 0.15);
                 border-radius: var(--radius-sm);
-                background: rgba(0,10,15,0.8);
+                background: rgba(0, 10, 15, 0.8);
                 padding: var(--space-sm) var(--space-md);
                 font-size: var(--font-size-sm);
-                color: rgba(0,212,255,0.8);
+                color: rgba(0, 212, 255, 0.8);
                 line-height: 1.5;
                 font-family: var(--font-mono);
                 white-space: pre-wrap;
             }
 
             .transcript-placeholder {
-                color: rgba(0,212,255,0.25);
+                color: rgba(0, 212, 255, 0.25);
                 font-style: italic;
             }
 
@@ -331,9 +358,9 @@ export class CalibrationView extends LitElement {
                 font-size: var(--font-size-sm);
                 font-weight: var(--font-weight-medium);
                 cursor: pointer;
-                border: 1px solid rgba(0,212,255,0.2);
-                background: rgba(0,212,255,0.04);
-                color: rgba(0,212,255,0.7);
+                border: 1px solid rgba(0, 212, 255, 0.2);
+                background: rgba(0, 212, 255, 0.04);
+                color: rgba(0, 212, 255, 0.7);
                 transition: all 0.18s ease;
                 font-family: var(--font-mono);
                 text-transform: uppercase;
@@ -342,22 +369,22 @@ export class CalibrationView extends LitElement {
             }
 
             .cal-btn:hover {
-                border-color: rgba(0,212,255,0.5);
-                background: rgba(0,212,255,0.1);
+                border-color: rgba(0, 212, 255, 0.5);
+                background: rgba(0, 212, 255, 0.1);
                 color: #00d4ff;
-                box-shadow: 0 0 12px rgba(0,212,255,0.12);
+                box-shadow: 0 0 12px rgba(0, 212, 255, 0.12);
             }
 
             .cal-btn.primary {
-                background: linear-gradient(135deg, rgba(0,212,255,0.15) 0%, rgba(127,90,240,0.12) 100%);
-                border-color: rgba(0,212,255,0.6);
+                background: linear-gradient(135deg, rgba(0, 212, 255, 0.15) 0%, rgba(127, 90, 240, 0.12) 100%);
+                border-color: rgba(0, 212, 255, 0.6);
                 color: #00d4ff;
-                box-shadow: 0 0 14px rgba(0,212,255,0.12);
+                box-shadow: 0 0 14px rgba(0, 212, 255, 0.12);
             }
 
             .cal-btn.primary:hover {
-                background: linear-gradient(135deg, rgba(0,212,255,0.25) 0%, rgba(127,90,240,0.2) 100%);
-                box-shadow: 0 0 20px rgba(0,212,255,0.22);
+                background: linear-gradient(135deg, rgba(0, 212, 255, 0.25) 0%, rgba(127, 90, 240, 0.2) 100%);
+                box-shadow: 0 0 20px rgba(0, 212, 255, 0.22);
             }
 
             .cal-btn:disabled {
@@ -367,24 +394,24 @@ export class CalibrationView extends LitElement {
 
             .cal-btn.skip {
                 background: transparent;
-                border-color: rgba(0,212,255,0.22);
-                color: rgba(0,212,255,0.6);
+                border-color: rgba(0, 212, 255, 0.22);
+                color: rgba(0, 212, 255, 0.6);
             }
 
             .cal-btn.skip:hover {
-                border-color: rgba(0,212,255,0.55);
-                background: rgba(0,212,255,0.08);
+                border-color: rgba(0, 212, 255, 0.55);
+                background: rgba(0, 212, 255, 0.08);
                 color: #00d4ff;
-                box-shadow: 0 0 12px rgba(0,212,255,0.14);
+                box-shadow: 0 0 12px rgba(0, 212, 255, 0.14);
             }
 
             /* ── Completion card ── */
             .completion-card {
                 width: 100%;
                 max-width: 520px;
-                border: 1px solid rgba(34,197,94,0.35);
+                border: 1px solid rgba(34, 197, 94, 0.35);
                 border-radius: var(--radius-md);
-                background: rgba(34,197,94,0.05);
+                background: rgba(34, 197, 94, 0.05);
                 backdrop-filter: blur(12px);
                 padding: var(--space-lg);
                 text-align: center;
@@ -392,13 +419,13 @@ export class CalibrationView extends LitElement {
                 flex-direction: column;
                 gap: var(--space-md);
                 align-items: center;
-                box-shadow: 0 0 30px rgba(34,197,94,0.07);
+                box-shadow: 0 0 30px rgba(34, 197, 94, 0.07);
                 animation: cal-fade-up 0.4s ease both;
             }
 
             .completion-icon {
                 font-size: 32px;
-                filter: drop-shadow(0 0 12px rgba(34,197,94,0.5));
+                filter: drop-shadow(0 0 12px rgba(34, 197, 94, 0.5));
             }
 
             .completion-title {
@@ -412,7 +439,7 @@ export class CalibrationView extends LitElement {
 
             .completion-subtitle {
                 font-size: var(--font-size-sm);
-                color: rgba(34,197,94,0.55);
+                color: rgba(34, 197, 94, 0.55);
                 line-height: 1.5;
                 font-family: var(--font-mono);
             }
@@ -420,23 +447,27 @@ export class CalibrationView extends LitElement {
             .analyzing-spinner {
                 width: 24px;
                 height: 24px;
-                border: 2px solid rgba(0,212,255,0.15);
+                border: 2px solid rgba(0, 212, 255, 0.15);
                 border-top-color: #00d4ff;
                 border-radius: 50%;
                 animation: spin 0.8s linear infinite;
-                box-shadow: 0 0 10px rgba(0,212,255,0.2);
+                box-shadow: 0 0 10px rgba(0, 212, 255, 0.2);
             }
 
-            @keyframes spin { to { transform: rotate(360deg); } }
+            @keyframes spin {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
 
             /* ── Typed input fallback ── */
             .typed-input {
                 -webkit-app-region: no-drag;
                 width: min(100%, 420px);
                 max-width: 420px;
-                background: rgba(0,10,15,0.85);
-                color: rgba(0,212,255,0.85);
-                border: 1px solid rgba(0,212,255,0.2);
+                background: rgba(0, 10, 15, 0.85);
+                color: rgba(0, 212, 255, 0.85);
+                border: 1px solid rgba(0, 212, 255, 0.2);
                 border-radius: var(--radius-sm);
                 padding: var(--space-sm) var(--space-md);
                 font-size: var(--font-size-sm);
@@ -448,18 +479,20 @@ export class CalibrationView extends LitElement {
 
             .typed-input:focus {
                 outline: none;
-                border-color: rgba(0,212,255,0.6);
-                box-shadow: 0 0 0 1px rgba(0,212,255,0.2), 0 0 12px rgba(0,212,255,0.1);
+                border-color: rgba(0, 212, 255, 0.6);
+                box-shadow:
+                    0 0 0 1px rgba(0, 212, 255, 0.2),
+                    0 0 12px rgba(0, 212, 255, 0.1);
             }
 
             .typed-input::placeholder {
-                color: rgba(0,212,255,0.2);
+                color: rgba(0, 212, 255, 0.2);
             }
 
             .mode-toggle {
                 -webkit-app-region: no-drag;
                 font-size: var(--font-size-xs);
-                color: rgba(0,212,255,0.6);
+                color: rgba(0, 212, 255, 0.6);
                 cursor: pointer;
                 background: none;
                 border: none;
@@ -469,7 +502,9 @@ export class CalibrationView extends LitElement {
                 text-underline-offset: 2px;
             }
 
-            .mode-toggle:hover { opacity: 0.8; }
+            .mode-toggle:hover {
+                opacity: 0.8;
+            }
 
             .samples-count {
                 font-size: var(--font-size-xs);
@@ -480,7 +515,7 @@ export class CalibrationView extends LitElement {
 
             .status-text {
                 font-size: var(--font-size-xs);
-                color: rgba(0,212,255,0.45);
+                color: rgba(0, 212, 255, 0.45);
                 text-align: center;
                 font-style: italic;
                 font-family: var(--font-mono);
@@ -625,7 +660,7 @@ export class CalibrationView extends LitElement {
 
         // Stop mic stream tracks
         if (this._micStream) {
-            this._micStream.getTracks().forEach((t) => t.stop());
+            this._micStream.getTracks().forEach(t => t.stop());
             this._micStream = null;
         }
 
@@ -673,7 +708,7 @@ export class CalibrationView extends LitElement {
 
             this._mediaRecorder = new MediaRecorder(this._micStream, mimeType ? { mimeType } : undefined);
 
-            this._mediaRecorder.ondataavailable = (e) => {
+            this._mediaRecorder.ondataavailable = e => {
                 if (e.data.size > 0) {
                     this._audioChunks.push(e.data);
                 }
@@ -689,9 +724,7 @@ export class CalibrationView extends LitElement {
                     if (blob.size > 1000) {
                         // Only save if there's meaningful audio (> 1KB)
                         this._promptAudioBlobs[prompt.id] = blob;
-                        console.log(
-                            `CalibrationView: saved audio for prompt "${prompt.id}" — ${(blob.size / 1024).toFixed(1)} KB`
-                        );
+                        console.log(`CalibrationView: saved audio for prompt "${prompt.id}" — ${(blob.size / 1024).toFixed(1)} KB`);
                     }
                 }
                 this._audioChunks = [];
@@ -699,10 +732,7 @@ export class CalibrationView extends LitElement {
 
             this._mediaRecorder.start(1000); // Collect chunks every 1s
             this._isRecording = true;
-            console.log(
-                'CalibrationView: started recording for prompt',
-                CALIBRATION_PROMPTS[this._currentPromptIndex].id
-            );
+            console.log('CalibrationView: started recording for prompt', CALIBRATION_PROMPTS[this._currentPromptIndex].id);
             this.requestUpdate();
         } catch (err) {
             console.error('CalibrationView: MediaRecorder failed:', err);
@@ -759,22 +789,20 @@ export class CalibrationView extends LitElement {
         if (this._useTypedInput && this._typedText.trim()) {
             const prompt = CALIBRATION_PROMPTS[this._currentPromptIndex];
             this._transcripts = [
-                ...this._transcripts.filter((t) => t.promptId !== prompt.id),
+                ...this._transcripts.filter(t => t.promptId !== prompt.id),
                 { promptId: prompt.id, prompt: prompt.prompt, text: this._typedText.trim() },
             ];
             this._typedText = '';
         }
 
         // Wait a tick for the onstop handler to fire
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 200));
 
         if (this._currentPromptIndex < CALIBRATION_PROMPTS.length - 1) {
             this._currentPromptIndex++;
             this._currentTranscript = '';
             // Restore previous typed text if going to an already-answered prompt
-            const prev = this._transcripts.find(
-                (t) => t.promptId === CALIBRATION_PROMPTS[this._currentPromptIndex].id
-            );
+            const prev = this._transcripts.find(t => t.promptId === CALIBRATION_PROMPTS[this._currentPromptIndex].id);
             if (prev && this._useTypedInput) {
                 this._typedText = prev.text;
             }
@@ -798,7 +826,7 @@ export class CalibrationView extends LitElement {
             if (this._useTypedInput && this._typedText.trim()) {
                 const prompt = CALIBRATION_PROMPTS[this._currentPromptIndex];
                 this._transcripts = [
-                    ...this._transcripts.filter((t) => t.promptId !== prompt.id),
+                    ...this._transcripts.filter(t => t.promptId !== prompt.id),
                     { promptId: prompt.id, prompt: prompt.prompt, text: this._typedText.trim() },
                 ];
             }
@@ -808,9 +836,7 @@ export class CalibrationView extends LitElement {
             this._typedText = '';
 
             // Restore previous text
-            const prev = this._transcripts.find(
-                (t) => t.promptId === CALIBRATION_PROMPTS[this._currentPromptIndex].id
-            );
+            const prev = this._transcripts.find(t => t.promptId === CALIBRATION_PROMPTS[this._currentPromptIndex].id);
             if (prev) {
                 if (this._useTypedInput) {
                     this._typedText = prev.text;
@@ -835,15 +861,15 @@ export class CalibrationView extends LitElement {
         if (this._useTypedInput && this._typedText.trim()) {
             const prompt = CALIBRATION_PROMPTS[this._currentPromptIndex];
             this._transcripts = [
-                ...this._transcripts.filter((t) => t.promptId !== prompt.id),
+                ...this._transcripts.filter(t => t.promptId !== prompt.id),
                 { promptId: prompt.id, prompt: prompt.prompt, text: this._typedText.trim() },
             ];
         }
 
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 200));
 
         const audioCount = Object.keys(this._promptAudioBlobs).length;
-        const textCount = this._transcripts.filter((t) => !this._promptAudioBlobs[t.promptId]).length;
+        const textCount = this._transcripts.filter(t => !this._promptAudioBlobs[t.promptId]).length;
 
         if (audioCount + textCount >= 2) {
             await this._transcribeAndAnalyze();
@@ -860,9 +886,7 @@ export class CalibrationView extends LitElement {
 
         // Phase 1: transcribe any audio blobs that don't already have text
         const audioPromptIds = Object.keys(this._promptAudioBlobs);
-        const untranscribedIds = audioPromptIds.filter(
-            (id) => !this._transcripts.find((t) => t.promptId === id)
-        );
+        const untranscribedIds = audioPromptIds.filter(id => !this._transcripts.find(t => t.promptId === id));
 
         if (untranscribedIds.length > 0) {
             this._phase = 'transcribing';
@@ -872,7 +896,7 @@ export class CalibrationView extends LitElement {
             for (let i = 0; i < untranscribedIds.length; i++) {
                 const promptId = untranscribedIds[i];
                 const blob = this._promptAudioBlobs[promptId];
-                const promptObj = CALIBRATION_PROMPTS.find((p) => p.id === promptId);
+                const promptObj = CALIBRATION_PROMPTS.find(p => p.id === promptId);
 
                 this._statusText = `Transcribing sample ${i + 1} of ${untranscribedIds.length}...`;
                 this.requestUpdate();
@@ -880,19 +904,11 @@ export class CalibrationView extends LitElement {
                 try {
                     const text = await this._transcribeAudio(blob);
                     if (text && text.trim()) {
-                        this._transcripts = [
-                            ...this._transcripts,
-                            { promptId, prompt: promptObj?.prompt || '', text: text.trim() },
-                        ];
-                        console.log(
-                            `CalibrationView: transcribed "${promptId}": ${text.substring(0, 80)}...`
-                        );
+                        this._transcripts = [...this._transcripts, { promptId, prompt: promptObj?.prompt || '', text: text.trim() }];
+                        console.log(`CalibrationView: transcribed "${promptId}": ${text.substring(0, 80)}...`);
                     }
                 } catch (err) {
-                    console.error(
-                        `CalibrationView: failed to transcribe prompt "${promptId}":`,
-                        err
-                    );
+                    console.error(`CalibrationView: failed to transcribe prompt "${promptId}":`, err);
                 }
             }
         }
@@ -929,7 +945,7 @@ export class CalibrationView extends LitElement {
             throw new Error('Missing access token for calibration transcription');
         }
 
-        const { ipcRenderer } = window.require('electron');
+        const ipcRenderer = window.electronAPI;
         const audioBase64 = await this._blobToBase64(audioBlob);
         const result = await ipcRenderer.invoke('auth:calibration-transcribe', {
             accessToken: accessToken.trim(),
@@ -974,7 +990,7 @@ export class CalibrationView extends LitElement {
         const region = match ? match[1] : null;
         if (!region) throw new Error('Cannot extract region from Azure endpoint');
 
-        const language = (this.language || 'en-US');
+        const language = this.language || 'en-US';
         const url = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${language}&format=simple`;
 
         const response = await fetch(url, {
@@ -996,9 +1012,7 @@ export class CalibrationView extends LitElement {
     async _buildVoiceProfile(transcripts) {
         if (!transcripts || transcripts.length === 0) return null;
 
-        const samplesText = transcripts
-            .map((t, i) => `--- Sample ${i + 1} (prompt: "${t.prompt}") ---\n${t.text}`)
-            .join('\n\n');
+        const samplesText = transcripts.map((t, i) => `--- Sample ${i + 1} (prompt: "${t.prompt}") ---\n${t.text}`).join('\n\n');
 
         const analysisPrompt = `You are a speech pattern analyst. Below are real speech samples from a person.
 Your job is to extract ONLY patterns that are GENUINELY and REPEATEDLY present in their speech.
@@ -1031,14 +1045,13 @@ ${samplesText}
 
 Respond with ONLY the JSON object, no explanation.`;
 
-        // Try providers in order: Azure → Groq
+        // Try providers in order: Gemini → Groq
         const profile = await this._callLLMForAnalysis(analysisPrompt);
         if (!profile) return null;
 
         // Validate
         if (profile.fillerWords && !Array.isArray(profile.fillerWords)) profile.fillerWords = [];
-        if (profile.sentenceStarters && !Array.isArray(profile.sentenceStarters))
-            profile.sentenceStarters = [];
+        if (profile.sentenceStarters && !Array.isArray(profile.sentenceStarters)) profile.sentenceStarters = [];
 
         return {
             ...profile,
@@ -1054,7 +1067,7 @@ Respond with ONLY the JSON object, no explanation.`;
             throw new Error('Missing access token for calibration analysis');
         }
 
-        const { ipcRenderer } = window.require('electron');
+        const ipcRenderer = window.electronAPI;
         const result = await ipcRenderer.invoke('auth:calibration-analyze', {
             accessToken: accessToken.trim(),
             prompt,
@@ -1078,37 +1091,30 @@ Respond with ONLY the JSON object, no explanation.`;
         return btoa(binary);
     }
 
-    async _analyzeWithAzure(prompt, apiKey, endpoint, deployment) {
-        let baseEndpoint = endpoint.replace(/\/$/, '');
-        baseEndpoint = baseEndpoint.replace(
-            /\/openai\/(responses|deployments|completions).*$/i,
-            ''
-        );
-        const url = `${baseEndpoint}/openai/deployments/${deployment}/chat/completions?api-version=2025-04-01-preview`;
-
-        const response = await fetch(url, {
+    async _analyzeWithGemini(prompt, apiKey, model) {
+        const response = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
             method: 'POST',
             headers: {
-                'api-key': apiKey,
+                Authorization: `Bearer ${apiKey}`,
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
+                model: model || 'gemini-3.7-flash',
                 messages: [
                     {
                         role: 'system',
-                        content:
-                            'You are a speech pattern analyst. Respond only with valid JSON.',
+                        content: 'You are a speech pattern analyst. Respond only with valid JSON.',
                     },
                     { role: 'user', content: prompt },
                 ],
                 temperature: 0.1,
-                max_completion_tokens: 2048,
+                max_tokens: 2048,
             }),
         });
 
         if (!response.ok) {
             const errText = await response.text();
-            throw new Error(`Azure ${response.status}: ${errText}`);
+            throw new Error(`Gemini ${response.status}: ${errText}`);
         }
 
         const data = await response.json();
@@ -1128,8 +1134,7 @@ Respond with ONLY the JSON object, no explanation.`;
                 messages: [
                     {
                         role: 'system',
-                        content:
-                            'You are a speech pattern analyst. Respond only with valid JSON.',
+                        content: 'You are a speech pattern analyst. Respond only with valid JSON.',
                     },
                     { role: 'user', content: prompt },
                 ],
@@ -1194,9 +1199,7 @@ Respond with ONLY the JSON object, no explanation.`;
         const remaining = Math.max(0, TOTAL_CALIBRATION_SECONDS - this._elapsedSeconds);
         const isLast = this._currentPromptIndex === CALIBRATION_PROMPTS.length - 1;
         const audioCount = Object.keys(this._promptAudioBlobs).length;
-        const textCount = this._transcripts.filter(
-            (t) => !this._promptAudioBlobs[t.promptId]
-        ).length;
+        const textCount = this._transcripts.filter(t => !this._promptAudioBlobs[t.promptId]).length;
         const samplesCollected = audioCount + textCount;
 
         return html`
@@ -1204,8 +1207,7 @@ Respond with ONLY the JSON object, no explanation.`;
                 <div class="calibration-header">
                     <div class="calibration-title">Train Your Voice</div>
                     <div class="calibration-subtitle">
-                        Answer these prompts naturally. We'll analyze how you speak
-                        and make AI answers sound like you — not generic AI text.
+                        Answer these prompts naturally. We'll analyze how you speak and make AI answers sound like you — not generic AI text.
                     </div>
                 </div>
 
@@ -1219,118 +1221,96 @@ Respond with ONLY the JSON object, no explanation.`;
 
                 <!-- Prompt -->
                 <div class="prompt-card">
-                    <div class="prompt-number">
-                        Prompt ${this._currentPromptIndex + 1} of
-                        ${CALIBRATION_PROMPTS.length}
-                    </div>
+                    <div class="prompt-number">Prompt ${this._currentPromptIndex + 1} of ${CALIBRATION_PROMPTS.length}</div>
                     <div class="prompt-text">${prompt.prompt}</div>
                     <div class="prompt-hint">${prompt.hint}</div>
                 </div>
 
                 <!-- Audio level meter (when recording) -->
-                ${!this._useTypedInput
-                    ? html`
-                          <div class="audio-meter">
-                              <span class="audio-meter-label"
-                                  >${this._isRecording ? 'MIC' : '...'}</span
-                              >
-                              <div class="audio-meter-track">
-                                  <div
-                                      class="audio-meter-fill"
-                                      style="width: ${this._audioLevel}%"
-                                  ></div>
+                ${
+                    !this._useTypedInput
+                        ? html`
+                              <div class="audio-meter">
+                                  <span class="audio-meter-label">${this._isRecording ? 'MIC' : '...'}</span>
+                                  <div class="audio-meter-track">
+                                      <div class="audio-meter-fill" style="width: ${this._audioLevel}%"></div>
+                                  </div>
                               </div>
-                          </div>
-                      `
-                    : ''}
+                          `
+                        : ''
+                }
 
                 <!-- Recording status / error -->
-                ${this._isRecording
-                    ? html`<div class="recording-indicator">
-                          <div class="recording-dot"></div>
-                          Recording — speak naturally, your audio is being captured
-                      </div>`
-                    : this._micError
-                      ? html`<div class="error-text">${this._micError}</div>`
-                      : this._statusText
-                        ? html`<div class="status-text">${this._statusText}</div>`
-                        : ''}
+                ${
+                    this._isRecording
+                        ? html`<div class="recording-indicator">
+                              <div class="recording-dot"></div>
+                              Recording — speak naturally, your audio is being captured
+                          </div>`
+                        : this._micError
+                          ? html`<div class="error-text">${this._micError}</div>`
+                          : this._statusText
+                            ? html`<div class="status-text">${this._statusText}</div>`
+                            : ''
+                }
 
                 <!-- Input area -->
-                ${this._useTypedInput
-                    ? html`
-                          <textarea
-                              class="typed-input"
-                              placeholder="Type how you'd naturally say this out loud..."
-                              .value=${this._typedText}
-                              @input=${(e) => {
-                                  this._typedText = e.target.value;
-                              }}
-                          ></textarea>
-                      `
-                    : html`
-                          <div class="transcript-preview">
-                              ${this._currentTranscript
-                                  ? this._currentTranscript
-                                  : html`<span class="transcript-placeholder">
-                                        ${this._isRecording
-                                            ? 'Your audio is being recorded. Speak now — transcription happens when you click Next.'
-                                            : this._micError
-                                              ? 'Mic unavailable. Use the type option below.'
-                                              : 'Waiting for microphone...'}
-                                    </span>`}
-                          </div>
-                      `}
+                ${
+                    this._useTypedInput
+                        ? html`
+                              <textarea
+                                  class="typed-input"
+                                  placeholder="Type how you'd naturally say this out loud..."
+                                  .value=${this._typedText}
+                                  @input=${e => {
+                                      this._typedText = e.target.value;
+                                  }}
+                              ></textarea>
+                          `
+                        : html`
+                              <div class="transcript-preview">
+                                  ${
+                                      this._currentTranscript
+                                          ? this._currentTranscript
+                                          : html`<span class="transcript-placeholder">
+                                                ${
+                                                    this._isRecording
+                                                        ? 'Your audio is being recorded. Speak now — transcription happens when you click Next.'
+                                                        : this._micError
+                                                          ? 'Mic unavailable. Use the type option below.'
+                                                          : 'Waiting for microphone...'
+                                                }
+                                            </span>`
+                                  }
+                              </div>
+                          `
+                }
 
-                <button
-                    class="mode-toggle"
-                    @click=${() => this._toggleInputMode()}
-                >
-                    ${this._useTypedInput
-                        ? 'Switch to voice input'
-                        : "Can't use mic? Type instead"}
+                <button class="mode-toggle" @click=${() => this._toggleInputMode()}>
+                    ${this._useTypedInput ? 'Switch to voice input' : "Can't use mic? Type instead"}
                 </button>
 
-                ${samplesCollected > 0
-                    ? html`<div class="samples-count">
-                          ${samplesCollected}
-                          sample${samplesCollected !== 1 ? 's' : ''} recorded
-                      </div>`
-                    : ''}
+                ${
+                    samplesCollected > 0
+                        ? html`<div class="samples-count">${samplesCollected} sample${samplesCollected !== 1 ? 's' : ''} recorded</div>`
+                        : ''
+                }
 
                 <!-- Navigation -->
                 <div class="calibration-actions">
-                    ${this._currentPromptIndex > 0
-                        ? html`<button
-                              class="cal-btn"
-                              @click=${() => this._handlePrev()}
-                          >
-                              Back
-                          </button>`
-                        : ''}
-                    <button
-                        class="cal-btn primary"
-                        @click=${() => this._handleNext()}
-                    >
-                        ${isLast ? 'Finish & Analyze' : 'Next Prompt'}
-                    </button>
+                    ${this._currentPromptIndex > 0 ? html`<button class="cal-btn" @click=${() => this._handlePrev()}>Back</button>` : ''}
+                    <button class="cal-btn primary" @click=${() => this._handleNext()}>${isLast ? 'Finish & Analyze' : 'Next Prompt'}</button>
                 </div>
 
                 <div class="calibration-actions">
-                    ${samplesCollected >= 2
-                        ? html`<button
-                              class="cal-btn skip"
-                              @click=${() => this._handleFinishEarly()}
-                          >
-                              Done early? Analyze ${samplesCollected} samples
-                          </button>`
-                        : ''}
-                    <button
-                        class="cal-btn skip"
-                        @click=${() => this.onSkip()}
-                    >
-                        Skip calibration
-                    </button>
+                    ${
+                        samplesCollected >= 2
+                            ? html`<button class="cal-btn skip" @click=${() => this._handleFinishEarly()}>
+                                  Done early? Analyze ${samplesCollected} samples
+                              </button>`
+                            : ''
+                    }
+                    <button class="cal-btn skip" @click=${() => this.onSkip()}>Skip calibration</button>
                 </div>
             </div>
         `;
@@ -1342,9 +1322,7 @@ Respond with ONLY the JSON object, no explanation.`;
                 <div class="completion-card">
                     <div class="analyzing-spinner"></div>
                     <div class="completion-title">Transcribing your audio...</div>
-                    <div class="completion-subtitle">
-                        ${this._statusText || 'Converting your speech to text...'}
-                    </div>
+                    <div class="completion-subtitle">${this._statusText || 'Converting your speech to text...'}</div>
                 </div>
             </div>
         `;
@@ -1355,13 +1333,9 @@ Respond with ONLY the JSON object, no explanation.`;
             <div class="calibration-page">
                 <div class="completion-card">
                     <div class="analyzing-spinner"></div>
-                    <div class="completion-title">
-                        Analyzing your speech patterns...
-                    </div>
+                    <div class="completion-title">Analyzing your speech patterns...</div>
                     <div class="completion-subtitle">
-                        Extracting only genuinely observed patterns from your
-                        ${this._transcripts.length} samples. Nothing will be
-                        fabricated.
+                        Extracting only genuinely observed patterns from your ${this._transcripts.length} samples. Nothing will be fabricated.
                     </div>
                 </div>
             </div>
@@ -1374,10 +1348,7 @@ Respond with ONLY the JSON object, no explanation.`;
                 <div class="completion-card">
                     <div class="completion-icon">&#10003;</div>
                     <div class="completion-title">Voice profile ready</div>
-                    <div class="completion-subtitle">
-                        AI answers will now match your natural speaking style.
-                        Starting session...
-                    </div>
+                    <div class="completion-subtitle">AI answers will now match your natural speaking style. Starting session...</div>
                 </div>
             </div>
         `;

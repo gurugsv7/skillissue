@@ -1,7 +1,9 @@
 const { Ollama } = require('ollama');
 const { getSystemPrompt } = require('./prompts');
+const { getInterviewDomain } = require('../storage');
 const { sendToRenderer, initializeNewSession, saveConversationTurn } = require('./providerRuntime');
 const { formatSpokenInterviewAnswer } = require('./answerFormatting');
+const { isInterviewProfile, classifyInterviewQuestion, getQuestionShape } = require('./interviewProfiles');
 
 // ── State ──
 
@@ -215,6 +217,8 @@ async function sendToOllama(transcription) {
 
     console.log('[LocalAI] Sending to Ollama:', transcription.substring(0, 100) + '...');
 
+    const questionShape = classifyInterviewQuestion(transcription);
+
     localConversationHistory.push({
         role: 'user',
         content: transcription.trim(),
@@ -249,14 +253,14 @@ async function sendToOllama(transcription) {
             const token = part.message?.content || '';
             if (token) {
                 fullText += token;
-                const displayText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+                const displayText = isInterviewProfile(currentProfile) ? formatSpokenInterviewAnswer(fullText, questionShape) : fullText;
                 sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
                 isFirst = false;
             }
         }
 
         if (fullText.trim()) {
-            const savedText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+            const savedText = isInterviewProfile(currentProfile) ? formatSpokenInterviewAnswer(fullText, questionShape) : fullText;
             localConversationHistory.push({
                 role: 'assistant',
                 content: savedText.trim(),
@@ -286,7 +290,9 @@ async function initializeLocalSession(ollamaHost, model, whisperModel, profile, 
         const { getVoiceProfile } = require('../storage');
         const voiceProfile = getVoiceProfile();
         currentProfile = profile;
-        currentSystemPrompt = getSystemPrompt(profile, customPrompt, false, voiceProfile);
+        currentSystemPrompt = getSystemPrompt(profile, customPrompt, false, voiceProfile, {
+            domain: getInterviewDomain(),
+        });
 
         // Initialize Ollama client
         ollamaClient = new Ollama({ host: ollamaHost });
@@ -397,6 +403,9 @@ async function sendLocalImage(base64Data, prompt) {
         console.log('[LocalAI] Sending image to Ollama');
         sendToRenderer('update-status', 'Analyzing image...');
 
+        // Screenshots carry code / MCQ answers — never chop them into cue-card fragments.
+        const questionShape = getQuestionShape('coding');
+
         const userMessage = {
             role: 'user',
             content: prompt,
@@ -434,14 +443,14 @@ async function sendLocalImage(base64Data, prompt) {
             const token = part.message?.content || '';
             if (token) {
                 fullText += token;
-                const displayText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+                const displayText = isInterviewProfile(currentProfile) ? formatSpokenInterviewAnswer(fullText, questionShape) : fullText;
                 sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
                 isFirst = false;
             }
         }
 
         if (fullText.trim()) {
-            const savedText = (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(fullText) : fullText;
+            const savedText = isInterviewProfile(currentProfile) ? formatSpokenInterviewAnswer(fullText, questionShape) : fullText;
             localConversationHistory.push({ role: 'assistant', content: savedText.trim() });
             saveConversationTurn(prompt, savedText);
         }

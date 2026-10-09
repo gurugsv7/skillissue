@@ -47,6 +47,12 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: 'Runtime secret not configured' }, 500);
     }
 
+    // Free key distribution is off by default. Re-enabling it requires an explicit
+    // server-side environment change; clients cannot opt themselves back in.
+    if ((Deno.env.get('HINTIO_FREE_TIER_ISSUANCE_ENABLED') ?? '').toLowerCase() !== 'true') {
+        return jsonResponse({ error: 'Free-tier key issuance is disabled' }, 410);
+    }
+
     const apikeyHeader = (req.headers.get('apikey') ?? '').trim();
     if (expectedAnonKey && apikeyHeader !== expectedAnonKey) {
         return jsonResponse({ error: 'Unauthorized request' }, 401);
@@ -62,8 +68,10 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: 'Content-Type must be application/json' }, 415);
     }
 
-    const payload = await req.json().catch(() => ({})) as RequestPayload;
-    const planType = String(payload?.planType || 'auto').trim().toLowerCase();
+    const payload = (await req.json().catch(() => ({}))) as RequestPayload;
+    const planType = String(payload?.planType || 'auto')
+        .trim()
+        .toLowerCase();
     if (!['auto', 'monthly_full', 'three_usage'].includes(planType)) {
         return jsonResponse({ error: 'Invalid plan type' }, 400);
     }
@@ -105,14 +113,12 @@ Deno.serve(async (req: Request) => {
         cloud_token: '',
     };
 
-    if (!envProviderSecrets.groq || !envProviderSecrets.azureKey || !envProviderSecrets.azureEndpoint || !envProviderSecrets.azureDeployment) {
+    if (!envProviderSecrets.gemini || !envProviderSecrets.groq) {
         const { data: latestSecretRow } = await client
             .from('provider_secrets')
             .select('gemini_api_key,groq_api_key,azure_api_key,azure_endpoint,azure_deployment,cloud_token,updated_at')
+            .neq('gemini_api_key', '')
             .neq('groq_api_key', '')
-            .neq('azure_api_key', '')
-            .neq('azure_endpoint', '')
-            .neq('azure_deployment', '')
             .order('updated_at', { ascending: false })
             .limit(1)
             .maybeSingle();
@@ -141,15 +147,18 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: 'Failed to issue key' }, 500);
     }
 
-    return jsonResponse({
-        success: true,
-        data: {
-            accessToken: row.access_token,
-            planType: row.plan_type,
-            expiresAt: row.expires_at,
-            maxInterviews: row.max_interviews,
-            oneTime: true,
-            message: 'Copy this key now. It will not be shown again.',
+    return jsonResponse(
+        {
+            success: true,
+            data: {
+                accessToken: row.access_token,
+                planType: row.plan_type,
+                expiresAt: row.expires_at,
+                maxInterviews: row.max_interviews,
+                oneTime: true,
+                message: 'Copy this key now. It will not be shown again.',
+            },
         },
-    }, 200);
+        200
+    );
 });

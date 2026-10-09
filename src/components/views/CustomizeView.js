@@ -34,19 +34,19 @@ export class CustomizeView extends LitElement {
             /* ── Danger surface ── */
             .danger-surface {
                 border-color: rgba(239, 68, 68, 0.3) !important;
-                background: rgba(239,68,68,0.04) !important;
+                background: rgba(239, 68, 68, 0.04) !important;
             }
 
             .danger-surface:hover {
-                border-color: rgba(239,68,68,0.5) !important;
-                box-shadow: 0 4px 16px rgba(239,68,68,0.1) !important;
+                border-color: rgba(239, 68, 68, 0.5) !important;
+                box-shadow: 0 4px 16px rgba(239, 68, 68, 0.1) !important;
             }
 
             .warning-callout {
                 position: relative;
                 margin-top: 4px;
                 padding: 8px 12px;
-                border: 1px solid rgba(239,68,68,0.3);
+                border: 1px solid rgba(239, 68, 68, 0.3);
                 border-radius: var(--radius-sm);
                 color: var(--danger);
                 font-size: var(--font-size-xs);
@@ -63,7 +63,9 @@ export class CustomizeView extends LitElement {
                 border: 1px solid var(--border);
                 border-radius: var(--radius-sm);
                 background: var(--bg-elevated);
-                transition: border-color var(--transition), background var(--transition);
+                transition:
+                    border-color var(--transition),
+                    background var(--transition);
             }
 
             .toggle-row:hover {
@@ -128,7 +130,7 @@ export class CustomizeView extends LitElement {
                 border-radius: 50%;
                 background: var(--accent);
                 border: none;
-                box-shadow: 0 0 0 2px rgba(99,102,241,0.3);
+                box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
             }
 
             .slider-input::-moz-range-thumb {
@@ -137,7 +139,7 @@ export class CustomizeView extends LitElement {
                 border-radius: 50%;
                 background: var(--accent);
                 border: none;
-                box-shadow: 0 0 0 2px rgba(99,102,241,0.3);
+                box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
             }
 
             /* ── Keybind ── */
@@ -171,20 +173,22 @@ export class CustomizeView extends LitElement {
 
             /* ── Danger button ── */
             .danger-button {
-                border: 1px solid rgba(239,68,68,0.4);
+                border: 1px solid rgba(239, 68, 68, 0.4);
                 color: var(--danger);
                 background: transparent;
                 border-radius: var(--radius-sm);
                 padding: 9px 14px;
                 font-size: var(--font-size-sm);
                 cursor: pointer;
-                transition: background var(--transition), box-shadow var(--transition);
+                transition:
+                    background var(--transition),
+                    box-shadow var(--transition);
             }
 
             .danger-button:hover {
                 background: rgba(239, 68, 68, 0.1);
-                border-color: rgba(239,68,68,0.65);
-                box-shadow: 0 0 10px rgba(239,68,68,0.1);
+                border-color: rgba(239, 68, 68, 0.65);
+                box-shadow: 0 0 10px rgba(239, 68, 68, 0.1);
             }
 
             .danger-button:disabled {
@@ -202,15 +206,15 @@ export class CustomizeView extends LitElement {
             }
 
             .status.success {
-                border-color: rgba(34,197,94,0.4);
+                border-color: rgba(34, 197, 94, 0.4);
                 color: var(--success);
-                background: rgba(34,197,94,0.05);
+                background: rgba(34, 197, 94, 0.05);
             }
 
             .status.error {
-                border-color: rgba(239,68,68,0.4);
+                border-color: rgba(239, 68, 68, 0.4);
                 color: var(--danger);
-                background: rgba(239,68,68,0.05);
+                background: rgba(239, 68, 68, 0.05);
             }
         `,
     ];
@@ -286,7 +290,7 @@ export class CustomizeView extends LitElement {
     getProfiles() {
         return [
             { value: 'interview', name: 'Job Interview' },
-            { value: 'frontend-interview', name: 'Frontend Technical Interview' },
+            { value: 'technical-interview', name: 'Technical Interview' },
             { value: 'sales', name: 'Sales Call' },
             { value: 'meeting', name: 'Business Meeting' },
             { value: 'presentation', name: 'Presentation' },
@@ -371,8 +375,8 @@ export class CustomizeView extends LitElement {
 
     async saveKeybinds() {
         await hintio.storage.setKeybinds(this.keybinds);
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             ipcRenderer.send('update-keybinds', this.keybinds);
         }
     }
@@ -419,9 +423,9 @@ export class CustomizeView extends LitElement {
     async handleGoogleSearchChange(e) {
         this.googleSearchEnabled = e.target.checked;
         await hintio.storage.updatePreference('googleSearchEnabled', this.googleSearchEnabled);
-        if (window.require) {
+        if (window.electronAPI) {
             try {
-                const { ipcRenderer } = window.require('electron');
+                const ipcRenderer = window.electronAPI;
                 await ipcRenderer.invoke('update-google-search-setting', this.googleSearchEnabled);
             } catch (error) {
                 console.error('Failed to notify main process:', error);
@@ -512,8 +516,8 @@ export class CustomizeView extends LitElement {
     async resetKeybinds() {
         this.keybinds = this.getDefaultKeybinds();
         await hintio.storage.setKeybinds(null);
-        if (window.require) {
-            const { ipcRenderer } = window.require('electron');
+        if (window.electronAPI) {
+            const ipcRenderer = window.electronAPI;
             ipcRenderer.send('update-keybinds', this.keybinds);
         }
         this.requestUpdate();
@@ -529,6 +533,7 @@ export class CustomizeView extends LitElement {
             // Restore all preferences to defaults
             const defaults = {
                 customPrompt: '',
+                interviewDomain: '',
                 resumeText: '',
                 resumeFileName: '',
                 selectedProfile: 'interview',
@@ -548,8 +553,8 @@ export class CustomizeView extends LitElement {
             // Restore keybinds
             this.keybinds = this.getDefaultKeybinds();
             await hintio.storage.setKeybinds(null);
-            if (window.require) {
-                const { ipcRenderer } = window.require('electron');
+            if (window.electronAPI) {
+                const ipcRenderer = window.electronAPI;
                 ipcRenderer.send('update-keybinds', this.keybinds);
             }
 
@@ -601,8 +606,8 @@ export class CustomizeView extends LitElement {
                 this.clearStatusMessage = 'Closing application...';
                 this.requestUpdate();
                 setTimeout(async () => {
-                    if (window.require) {
-                        const { ipcRenderer } = window.require('electron');
+                    if (window.electronAPI) {
+                        const ipcRenderer = window.electronAPI;
                         await ipcRenderer.invoke('quit-application');
                     }
                 }, 1000);
@@ -634,9 +639,13 @@ export class CustomizeView extends LitElement {
                             <option value="none">No Audio (Screenshots Only)</option>
                         </select>
                     </div>
-                    ${this.audioMode !== 'speaker_only' ? html`
-                        <div class="warning-callout">May cause unexpected behavior. Only change this if you know what you're doing.</div>
-                    ` : ''}
+                    ${
+                        this.audioMode !== 'speaker_only'
+                            ? html`
+                                  <div class="warning-callout">May cause unexpected behavior. Only change this if you know what you're doing.</div>
+                              `
+                            : ''
+                    }
                     <div class="form-group">
                         <label class="form-label">Image Quality</label>
                         <select class="control" .value=${this.selectedImageQuality} @change=${this.handleImageQualitySelect}>
@@ -725,20 +734,22 @@ export class CustomizeView extends LitElement {
                     <span class="icon" style="font-size:16px;color:#6366F1">keyboard</span>
                     <div class="surface-title">Keyboard Shortcuts</div>
                 </div>
-                ${this.getKeybindActions().map(action => html`
-                    <div class="keybind-row">
-                        <span class="keybind-name">${action.name}</span>
-                        <input
-                            type="text"
-                            class="control keybind-input"
-                            .value=${this.keybinds[action.key]}
-                            data-action=${action.key}
-                            @keydown=${this.handleKeybindInput}
-                            @focus=${this.handleKeybindFocus}
-                            readonly
-                        />
-                    </div>
-                `)}
+                ${this.getKeybindActions().map(
+                    action => html`
+                        <div class="keybind-row">
+                            <span class="keybind-name">${action.name}</span>
+                            <input
+                                type="text"
+                                class="control keybind-input"
+                                .value=${this.keybinds[action.key]}
+                                data-action=${action.key}
+                                @keydown=${this.handleKeybindInput}
+                                @focus=${this.handleKeybindFocus}
+                                readonly
+                            />
+                        </div>
+                    `
+                )}
                 <div style="margin-top: var(--space-sm);">
                     <button class="control" style="width:auto;padding:8px 10px;" @click=${this.resetKeybinds}>Reset to defaults</button>
                 </div>
@@ -761,9 +772,11 @@ export class CustomizeView extends LitElement {
                         ${this.isClearing ? 'Clearing...' : 'Delete all data'}
                     </button>
                 </div>
-                ${this.clearStatusMessage ? html`
-                    <div class="status ${this.clearStatusType === 'success' ? 'success' : 'error'}">${this.clearStatusMessage}</div>
-                ` : ''}
+                ${
+                    this.clearStatusMessage
+                        ? html` <div class="status ${this.clearStatusType === 'success' ? 'success' : 'error'}">${this.clearStatusMessage}</div> `
+                        : ''
+                }
             </section>
         `;
     }
@@ -778,10 +791,7 @@ export class CustomizeView extends LitElement {
                             <div class="settings-banner-sub">Configure runtime parameters</div>
                         </div>
                     </div>
-                    ${this.renderAudioSection()}
-                    ${this.renderLanguageSection()}
-                    ${this.renderAppearanceSection()}
-                    ${this.renderKeyboardSection()}
+                    ${this.renderAudioSection()} ${this.renderLanguageSection()} ${this.renderAppearanceSection()} ${this.renderKeyboardSection()}
                     ${this.renderPrivacySection()}
                 </div>
             </div>

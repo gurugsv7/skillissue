@@ -384,6 +384,9 @@ export class HistoryView extends LitElement {
     getProfileNames() {
         return {
             interview: 'Job Interview',
+            'technical-interview': 'Technical Interview',
+            // Retired id — kept so older saved sessions still show a label.
+            'frontend-interview': 'Technical Interview',
             sales: 'Sales Call',
             meeting: 'Business Meeting',
             presentation: 'Presentation',

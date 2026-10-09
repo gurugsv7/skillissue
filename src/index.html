@@ -9,30 +9,30 @@
 
             :root {
                 /* Backgrounds */
-                --bg-app: #09090B;
-                --bg-surface: #0F0F12;
-                --bg-elevated: #18181B;
-                --bg-hover: #1E1E24;
+                --bg-app: #09090b;
+                --bg-surface: #0f0f12;
+                --bg-elevated: #18181b;
+                --bg-hover: #1e1e24;
 
                 /* Text */
-                --text-primary: #FAFAFA;
-                --text-secondary: #A1A1AA;
-                --text-muted: #52525B;
+                --text-primary: #fafafa;
+                --text-secondary: #a1a1aa;
+                --text-muted: #52525b;
 
                 /* Borders & Lines */
-                --border: #27272A;
-                --border-strong: #3F3F46;
+                --border: #27272a;
+                --border-strong: #3f3f46;
 
                 /* Accent — indigo/violet */
-                --accent: #6366F1;
-                --accent-hover: #4F46E5;
+                --accent: #6366f1;
+                --accent-hover: #4f46e5;
                 --accent-glow: rgba(99, 102, 241, 0.25);
                 --accent-subtle: rgba(99, 102, 241, 0.08);
 
                 /* Status */
-                --success: #22C55E;
-                --warning: #F59E0B;
-                --danger: #EF4444;
+                --success: #22c55e;
+                --warning: #f59e0b;
+                --danger: #ef4444;
 
                 /* Typography */
                 --font: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -89,7 +89,7 @@
                 --focus-box-shadow: transparent;
                 --scrollbar-track: var(--bg-app);
                 --scrollbar-thumb: var(--border-strong);
-                --scrollbar-thumb-hover: #52525B;
+                --scrollbar-thumb-hover: #52525b;
                 --scrollbar-background: var(--bg-app);
                 --start-button-background: var(--accent);
                 --start-button-color: #ffffff;
@@ -170,7 +170,11 @@
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
-                font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
+                font-variation-settings:
+                    'FILL' 0,
+                    'wght' 400,
+                    'GRAD' 0,
+                    'opsz' 20;
                 user-select: none;
                 flex-shrink: 0;
             }
@@ -190,7 +194,7 @@
             }
 
             ::-webkit-scrollbar-thumb:hover {
-                background: #52525B;
+                background: #52525b;
             }
 
             hintio-app {
@@ -207,7 +211,6 @@
         <script type="module" src="components/app/HintioApp.js"></script>
 
         <hintio-app id="hintio"></hintio-app>
-        <script src="script.js"></script>
         <script src="utils/renderer.js"></script>
     </body>
 </html>

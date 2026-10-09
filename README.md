@@ -15,13 +15,15 @@ Hintio is an Electron desktop app that captures your screen and audio to deliver
 
 - **BYOK (Bring Your Own Key)** — Connect Gemini (Google AI Studio) or Groq with your own API keys. No data leaves your control.
 - **Local AI** — Fully offline inference via [Ollama](https://ollama.com) (any model) with on-device speech-to-text via Whisper. No internet required after setup.
-- **Azure** — Enterprise Azure OpenAI endpoint support.
+- **OpenAI (primary)** — Answers, screen analysis and calibration run on `gpt-5.6-luna` by default. Measured ~1.0s to first token on a live interview turn.
+- **Gemini (automatic fallback)** — If OpenAI is rate limited or down, the app fails over to Google AI Studio's free Flash models with no user action. Both providers speak the same wire format, so nothing else changes.
 
 ### Session Profiles
 
-Six pre-built prompt profiles, each tuned for the context:
+Seven pre-built prompt profiles, each tuned for the context:
 
-- **Job Interview** — Ready-to-speak technical and behavioural answers in natural spoken English
+- **Job Interview** — Ready-to-speak answers for an interview in any field. The answer shape follows the question that was actually asked: three pointers for a concept, STAR for "tell me about a time", clarify/design/bottleneck/tradeoff for a design question, a direct line plus flexibility for salary. Set **Interview Domain** in setup so terminology locks to your field.
+- **Technical Interview** — The same, tuned for technical depth in whichever engineering field your context establishes — backend, mobile, data, ML, infra, security, embedded, hardware
 - **Sales Call** — Real-time objection handling and pitch support
 - **Business Meeting** — Clear, professional spoken responses
 - **Presentation** — Confident, engaging presenter script
@@ -86,9 +88,9 @@ Optional: if you want to ship extra Windows prerequisites in-app (for support/tr
 5. If a dependency error appears, capture the exact message and filename (e.g. `VCRUNTIME140.dll`, `ffmpeg.dll`) for targeted fixes.
 
 For **BYOK** mode, you need **one** of the following — not all:
-- **Gemini** — get a free key at [Google AI Studio](https://aistudio.google.com/apikey)
+- **Gemini** — get a free key at [Google AI Studio](https://aistudio.google.com/apikey). You can supply **several keys separated by commas**: each free-tier key allows ~10 requests/minute, so keys from separate Google accounts raise the ceiling. Requests are spread across them, and a rate-limited key fails over to the next one immediately.
 - **Groq** — get a key at [console.groq.com](https://console.groq.com)
-- **Azure** — provide your Azure OpenAI endpoint and key (Gemini and Groq keys are not needed)
+- **Groq (speech-to-text)** — a Groq key is still used for Whisper transcription during live sessions
 
 For **Local AI** mode, install [Ollama](https://ollama.com) and pull any model (e.g. `ollama pull llama3.2`). Whisper is downloaded automatically on first session start.
 

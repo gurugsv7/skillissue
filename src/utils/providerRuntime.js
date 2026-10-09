@@ -4,13 +4,21 @@ const { spawn } = require('child_process');
 const { saveDebugAudio } = require('../audioUtils');
 const { getSystemPrompt } = require('./prompts');
 const {
+    isInterviewProfile,
+    normalizeProfile,
+    classifyInterviewQuestion,
+    getQuestionShape,
+    buildLiveInterviewPrompt,
+} = require('./interviewProfiles');
+const {
     getAvailableModel,
     incrementLimitCount,
     getApiKey,
     getGroqApiKey,
     getAzureApiKey,
     getAzureEndpoint,
-    getAzureDeployment,
+    getGeminiModel,
+    getInterviewDomain,
     getCredentials,
     incrementCharUsage,
     getModelForToday,
@@ -20,6 +28,18 @@ const { connectCloud, sendCloudAudio, sendCloudText, sendCloudImage, closeCloud,
 const azureStt = require('./azureStt');
 const speechStt = require('./speechStt');
 const { enforceIpcRateLimit, enforceNamedRateLimit, ensureStringWithinLimit, hashValue } = require('./abuseProtection');
+const { consumeOpenAIStream } = require('./sseParser');
+const { formatSpokenInterviewAnswer } = require('./answerFormatting');
+const { LlmKeyPool, parseApiKeys } = require('./llmKeyPool');
+const {
+    PROVIDERS,
+    PROVIDER_FALLBACK_ORDER,
+    OUTPUT_BUDGET,
+    getProvider,
+    describeError: describeLlmError,
+    requestChatCompletion: requestLlm,
+    fetchChatCompletionText: fetchLlmText,
+} = require('./llmProvider');
 
 // Lazy-loaded to avoid circular dependency (localai.js imports from providerRuntime.js)
 let _localai = null;
@@ -44,13 +64,23 @@ let currentCustomPrompt = null;
 let isInitializingSession = false;
 let currentSystemPrompt = null;
 let currentVoiceProfile = null;
+let currentLanguage = '';
+let currentInterviewDomain = '';
 let runtimeProviderSecrets = null;
 let runtimeSecretsToken = '';
 let runtimeSecretsResolvedAt = 0;
 let lastAcceptedTranscriptNormalized = '';
+// The interviewer's current turn, as heard so far. Speech-to-text splits a long
+// question at a thinking pause, so a single question can arrive as two or three
+// transcripts. Everything that lands inside the continuation window belongs to
+// the same question and is answered in ONE window, not several.
+let currentTurnText = '';
+let currentTurnStartedAt = 0;
 let lastAcceptedTranscriptAt = 0;
-let isAzureResponseInFlight = false;
+let isGeminiResponseInFlight = false;
 let pendingInterviewerTranscript = '';
+// Set when the queued transcript continues the question already being answered.
+let pendingReplacesLast = false;
 let trialSessionTimeoutHandle = null;
 let isTrialSessionTimedOut = false;
 
@@ -60,21 +90,16 @@ const FAST_INTERVIEW_CUSTOM_CONTEXT_MAX_CHARS = 1400;
 const FAST_INTERVIEW_GROQ_HISTORY_TURNS = 4;
 const FAST_INTERVIEW_GEMMA_HISTORY_CHARS = 8000;
 const FAST_INTERVIEW_MAX_OUTPUT_TOKENS = 420;
-const MIN_TURN_WORDS = 4;
-const DUPLICATE_TRANSCRIPT_WINDOW_MS = 25000;
+// "Why?", "Big-O?", "Explain closures." are real interview questions. A high
+// floor here drops exactly the turns where an instant answer matters most.
+const MIN_TURN_WORDS = 2;
+// Long enough to swallow Whisper re-emitting the same tail, short enough that
+// "sorry, could you repeat that?" is not locked out.
+const DUPLICATE_TRANSCRIPT_WINDOW_MS = 7000;
 const MIN_MEANINGFUL_WORDS = 2;
 const QUESTION_LEAD_PATTERN = /^(what|why|how|when|where|who|which|can|could|would|do|does|did|is|are|was|were)\b/;
-const PROMPT_LEAD_PATTERN = /^(tell me|walk me through|explain|describe|compare|implement|write|build|design|solve|give me|can you|could you|would you)\b/;
-function getAzureReasoningEffort(azureDeployment = '') {
-    const deployment = String(azureDeployment || '').toLowerCase();
-
-    if (deployment.includes('gpt-5')) {
-        return 'medium';
-    }
-
-    return undefined;
-}
-
+const PROMPT_LEAD_PATTERN =
+    /^(tell me|walk me through|take me through|talk me through|explain|describe|compare|implement|write|build|design|solve|give me|can you|could you|would you|let's|lets|move on|next question|now |suppose|imagine|consider)\b/;
 const COMPARISON_STYLE_PATTERNS = [
     /\b(flexbox|grid)\b.*\b(vs|versus|or)\b.*\b(flexbox|grid)\b/,
     /\b(which one|which)\b.*\b(better|best|prefer|recommended)\b/,
@@ -128,7 +153,7 @@ const RATE_LIMIT_POLICIES = {
         blockDurationMs: 10 * 60 * 1000,
         message: 'Too many calibration analysis requests. Please try again shortly.',
     },
-    initializeAzure: {
+    initializeGemini: {
         windowMs: 10 * 60 * 1000,
         max: 5,
         blockDurationMs: 10 * 60 * 1000,
@@ -145,6 +170,12 @@ const RATE_LIMIT_POLICIES = {
         max: 20,
         blockDurationMs: 2 * 60 * 1000,
         message: 'Too many screenshot requests. Slow down and try again.',
+    },
+    sendAudio: {
+        windowMs: 60 * 1000,
+        max: 1_500,
+        blockDurationMs: 60 * 1000,
+        message: 'Audio input rate exceeded. Restart the session and try again.',
     },
 };
 
@@ -199,10 +230,12 @@ function normalizeTranscriptForGate(text = '') {
 }
 
 function getGateWordStats(normalizedText = '') {
-    const words = String(normalizedText || '').split(' ').filter(Boolean);
-    const contentWords = words.filter((word) => /[a-z]/.test(word));
-    const meaningfulWords = contentWords.filter((word) => word.length >= 3 && !FILLER_WORDS.has(word));
-    const likelyNoiseTokens = meaningfulWords.filter((word) => word.length >= 5 && !/[aeiou]/.test(word));
+    const words = String(normalizedText || '')
+        .split(' ')
+        .filter(Boolean);
+    const contentWords = words.filter(word => /[a-z]/.test(word));
+    const meaningfulWords = contentWords.filter(word => word.length >= 3 && !FILLER_WORDS.has(word));
+    const likelyNoiseTokens = meaningfulWords.filter(word => word.length >= 5 && !/[aeiou]/.test(word));
 
     return {
         words,
@@ -218,7 +251,7 @@ function isQuestionLikeTurn(normalizedText = '', stats = null) {
     const turnStats = stats || getGateWordStats(normalizedText);
     const wordCount = turnStats.words.length;
     const meaningfulCount = turnStats.meaningfulWords.length;
-    const mostlyNoise = turnStats.meaningfulWords.length > 0 && (turnStats.likelyNoiseTokens.length / turnStats.meaningfulWords.length) >= 0.6;
+    const mostlyNoise = turnStats.meaningfulWords.length > 0 && turnStats.likelyNoiseTokens.length / turnStats.meaningfulWords.length >= 0.6;
     if (mostlyNoise) return false;
 
     if (wordCount < MIN_TURN_WORDS) return false;
@@ -227,13 +260,61 @@ function isQuestionLikeTurn(normalizedText = '', stats = null) {
     const hasQuestionMark = normalizedText.includes('?');
     const startsWithQuestionCue = QUESTION_LEAD_PATTERN.test(normalizedText);
     const startsWithPromptCue = PROMPT_LEAD_PATTERN.test(normalizedText);
-    const hasActionCue = /\b(explain|describe|compare|implement|write|build|design|solve|difference|between|approach|complexity|why|how|what|which)\b/.test(normalizedText);
-    const hasComparisonCue = COMPARISON_STYLE_PATTERNS.some((pattern) => pattern.test(normalizedText));
-    const hasDecisionCue = DECISION_STYLE_PATTERNS.some((pattern) => pattern.test(normalizedText));
+    const hasActionCue =
+        /\b(explain|describe|compare|implement|write|build|design|solve|difference|between|approach|complexity|why|how|what|which)\b/.test(
+            normalizedText
+        );
+    const hasComparisonCue = COMPARISON_STYLE_PATTERNS.some(pattern => pattern.test(normalizedText));
+    const hasDecisionCue = DECISION_STYLE_PATTERNS.some(pattern => pattern.test(normalizedText));
 
-    if (hasQuestionMark && (hasActionCue || hasDecisionCue || hasComparisonCue)) return true;
+    // Anything phrased as a question is a question.
+    if (hasQuestionMark) return true;
     if (startsWithQuestionCue || startsWithPromptCue) return true;
-    return (hasDecisionCue && hasActionCue) || hasComparisonCue;
+    if (hasComparisonCue || (hasDecisionCue && hasActionCue)) return true;
+
+    // Imperatives and topic switches ("now the system design part", "take me
+    // through the incident") carry no question mark and no lead cue. An action
+    // cue plus real content is enough: a false accept costs one cheap Flash
+    // call, a false reject costs the interviewer repeating themselves.
+    return hasActionCue && meaningfulCount >= 3;
+}
+
+// A pause long enough to split the transcript, but short enough that the
+// interviewer is plainly still asking the same thing. Beyond this, a new
+// transcript is a genuinely new question.
+const TURN_CONTINUATION_WINDOW_MS = 12_000;
+
+/**
+ * Fold a transcript into the interviewer's current turn.
+ *
+ * Speech-to-text flushes on silence, so "in your project, what were you
+ * predicting, what features did you build, and why XGBoost?" arrives as two or
+ * three separate transcripts when the interviewer pauses to think. Answering
+ * each one separately gives the candidate several answer windows for a single
+ * question, and they cannot flip between windows mid-interview.
+ *
+ * So a transcript arriving inside the window is appended to what came before,
+ * and the whole question is re-answered over the top of the existing answer.
+ * The re-answer costs one extra request — trivial next to reading a half answer
+ * to an interviewer.
+ */
+function absorbIntoCurrentTurn(transcription) {
+    const text = String(transcription || '').trim();
+    const now = Date.now();
+    const withinWindow = currentTurnText && now - currentTurnStartedAt < TURN_CONTINUATION_WINDOW_MS;
+
+    if (!withinWindow) {
+        currentTurnText = text;
+        currentTurnStartedAt = now;
+        return { text, isContinuation: false };
+    }
+
+    // Whisper can re-emit the tail of the previous chunk; don't duplicate it.
+    const combined = currentTurnText.toLowerCase().includes(text.toLowerCase()) ? currentTurnText : `${currentTurnText} ${text}`.replace(/\s+/g, ' ').trim();
+
+    currentTurnText = combined;
+    console.log(`[TurnGate] Continuation — treating as one question (${combined.length} chars)`);
+    return { text: combined, isContinuation: true };
 }
 
 function shouldDispatchInterviewerTurn(transcription = '') {
@@ -255,9 +336,9 @@ function shouldDispatchInterviewerTurn(transcription = '') {
 
     const now = Date.now();
     const isDuplicate =
-        lastAcceptedTranscriptNormalized
-        && normalized === lastAcceptedTranscriptNormalized
-        && (now - lastAcceptedTranscriptAt) < DUPLICATE_TRANSCRIPT_WINDOW_MS;
+        lastAcceptedTranscriptNormalized &&
+        normalized === lastAcceptedTranscriptNormalized &&
+        now - lastAcceptedTranscriptAt < DUPLICATE_TRANSCRIPT_WINDOW_MS;
 
     if (isDuplicate) {
         return { accept: false, reason: 'duplicate', normalized };
@@ -268,8 +349,100 @@ function shouldDispatchInterviewerTurn(transcription = '') {
     return { accept: true, reason: 'accepted', normalized };
 }
 
+/**
+ * One key pool per provider, shared across the whole app, so per-key rate
+ * windows are tracked globally — a screenshot analysis and a spoken turn draw
+ * from the same budget and the pool knows it.
+ */
+const keyPools = {
+    openai: new LlmKeyPool([], { requestsPerMinute: 400 }), // paid Tier 1 is ~500 RPM
+    gemini: new LlmKeyPool([], { requestsPerMinute: 4 }), // free tier measured at 5 RPM
+};
+
+/**
+ * Keys for a provider, best source first: managed secrets from the access
+ * token, then the local credential store, then .env.
+ *
+ * Any source may hold several keys (comma / semicolon / newline separated).
+ * More keys means a higher effective ceiling, because the pool spreads load
+ * across them and fails over instantly instead of stalling on a 429.
+ */
+function getProviderKeys(providerId) {
+    if (providerId === 'gemini') {
+        const managed = runtimeProviderSecrets?.geminiApiKeys;
+        if (managed && managed.length) return parseApiKeys(managed);
+        if (runtimeProviderSecrets?.geminiApiKey) return parseApiKeys(runtimeProviderSecrets.geminiApiKey);
+        const stored = parseApiKeys(getApiKey());
+        if (stored.length) return stored;
+    }
+    if (providerId === 'openai' && runtimeProviderSecrets?.openaiApiKeys?.length) {
+        return parseApiKeys(runtimeProviderSecrets.openaiApiKeys);
+    }
+
+    const provider = getProvider(providerId);
+    for (const name of provider.envKeys) {
+        const fromEnv = parseApiKeys(process.env[name] || '');
+        if (fromEnv.length) return fromEnv;
+    }
+    return [];
+}
+
+function getProviderModel(providerId) {
+    const provider = getProvider(providerId);
+    if (providerId === 'openai' && runtimeProviderSecrets?.openaiModel) {
+        return runtimeProviderSecrets.openaiModel;
+    }
+    if (providerId === 'gemini') {
+        const configured = runtimeProviderSecrets?.geminiModel || getGeminiModel();
+        if (configured) return configured;
+    }
+    return (process.env[provider.envModel] || '').trim() || provider.defaultModel;
+}
+
+/**
+ * Refresh every pool from config and return the ordered provider list the
+ * request layer walks: preferred provider first, the rest as fallbacks. A
+ * provider with no keys is omitted entirely.
+ */
+function getLlmProviders() {
+    const preferred = (process.env.LLM_PROVIDER || '').trim().toLowerCase();
+    const order = preferred && PROVIDERS[preferred] ? [preferred, ...PROVIDER_FALLBACK_ORDER.filter(id => id !== preferred)] : PROVIDER_FALLBACK_ORDER;
+
+    const entries = [];
+    for (const id of order) {
+        const keys = getProviderKeys(id);
+        keyPools[id].setKeys(keys);
+        if (!keys.length) continue;
+        entries.push({ provider: getProvider(id), pool: keyPools[id], model: getProviderModel(id) });
+    }
+    return entries;
+}
+
+/** True when at least one provider is usable. */
+function hasLlmKey() {
+    return getLlmProviders().length > 0;
+}
+
+/** Human-readable summary for logs — never includes key material. */
+function describeLlmConfig() {
+    return getLlmProviders()
+        .map(e => `${e.provider.label}:${e.model} (${e.pool.size} key${e.pool.size === 1 ? '' : 's'})`)
+        .join(' -> ') || 'none configured';
+}
+
+/**
+ * One Gemini key, for the @google/genai SDK paths that manage their own
+ * transport and so cannot use the failover loop. They still get load
+ * spreading, which is what keeps them off the rate limit in the first place.
+ */
+function acquireGeminiKey() {
+    keyPools.gemini.setKeys(getProviderKeys('gemini'));
+    const lease = keyPools.gemini.acquire();
+    return lease ? lease.key : '';
+}
+
 function getEffectiveApiKey() {
-    return runtimeProviderSecrets?.geminiApiKey || getApiKey();
+    return getProviderKeys('gemini')[0] || '';
 }
 
 function getEffectiveGroqApiKey() {
@@ -282,10 +455,6 @@ function getEffectiveAzureApiKey() {
 
 function getEffectiveAzureEndpoint() {
     return runtimeProviderSecrets?.azureEndpoint || getAzureEndpoint();
-}
-
-function getEffectiveAzureDeployment() {
-    return runtimeProviderSecrets?.azureDeployment || getAzureDeployment();
 }
 
 function hasManagedCloudToken() {
@@ -308,18 +477,13 @@ async function resolveProviderSecrets(accessToken, options = {}) {
     }
 
     const now = Date.now();
-    if (
-        !consume &&
-        runtimeProviderSecrets
-        && runtimeSecretsToken === token
-        && (now - runtimeSecretsResolvedAt) < PROVIDER_SECRETS_CACHE_TTL_MS
-    ) {
+    if (!consume && runtimeProviderSecrets && runtimeSecretsToken === token && now - runtimeSecretsResolvedAt < PROVIDER_SECRETS_CACHE_TTL_MS) {
         return { success: true, data: runtimeProviderSecrets, cached: true };
     }
 
     const storedCreds = getCredentials();
-    const supabaseUrl = (storedCreds.supabaseUrl || supabaseConfig.url || '').trim();
-    const supabaseAnonKey = (storedCreds.supabaseAnonKey || supabaseConfig.anonKey || '').trim();
+    const supabaseUrl = (supabaseConfig.url || storedCreds.supabaseUrl || '').trim();
+    const supabaseAnonKey = (supabaseConfig.anonKey || storedCreds.supabaseAnonKey || '').trim();
     const functionName = (supabaseConfig.resolveSecretsFunction || 'resolve-provider-secrets').trim();
 
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -346,6 +510,7 @@ async function resolveProviderSecrets(accessToken, options = {}) {
         method: 'POST',
         headers,
         body: JSON.stringify({ accessToken: token, consume }),
+        signal: AbortSignal.timeout(15_000),
     });
 
     if (!response.ok) {
@@ -361,10 +526,14 @@ async function resolveProviderSecrets(accessToken, options = {}) {
 
     const resolvedSecrets = {
         geminiApiKey: data.geminiApiKey || '',
+        // Several keys can be issued so the client can fail over between accounts.
+        geminiApiKeys: parseApiKeys(data.geminiApiKeys || data.geminiApiKey || ''),
+        openaiApiKeys: parseApiKeys(data.openaiApiKeys || data.openaiApiKey || ''),
+        openaiModel: data.openaiModel || '',
+        geminiModel: data.geminiModel || '',
         groqApiKey: data.groqApiKey || '',
         azureApiKey: data.azureApiKey || '',
         azureEndpoint: data.azureEndpoint || '',
-        azureDeployment: data.azureDeployment || '',
         cloudToken: data.cloudToken || '',
         providerMode: data.providerMode || '',
         expiresAt: data.expiresAt || '',
@@ -410,7 +579,13 @@ let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000;
 
+// Incremented every time a new answer starts rendering. Deferred work
+// captures it and bails if the turn moved on, so a late rewrite cannot land on
+// top of a newer answer.
+let currentAnswerSeq = 0;
+
 function sendToRenderer(channel, data) {
+    if (channel === 'new-response') currentAnswerSeq++;
     const windows = BrowserWindow.getAllWindows();
     if (windows.length > 0) {
         windows[0].webContents.send(channel, data);
@@ -430,7 +605,7 @@ function startThreeUsageSessionTimeout(providerSessionRef) {
     trialSessionTimeoutHandle = setTimeout(async () => {
         isTrialSessionTimedOut = true;
         pendingInterviewerTranscript = '';
-        isAzureResponseInFlight = false;
+        isGeminiResponseInFlight = false;
 
         try {
             if (speechStt.isSpeechSTTActive()) {
@@ -467,17 +642,31 @@ function buildContextMessage() {
 }
 
 // Conversation management functions
-function initializeNewSession(profile = null, customPrompt = null) {
+function initializeNewSession(profile = null, customPrompt = null, language = '') {
     currentSessionId = Date.now().toString();
     currentTranscription = '';
     conversationHistory = [];
     screenAnalysisHistory = [];
     groqConversationHistory = [];
     pendingInterviewerTranscript = '';
+    currentTurnText = '';
+    currentTurnStartedAt = 0;
     clearTrialSessionTimeout();
-    currentProfile = profile;
+    currentProfile = normalizeProfile(profile);
     currentCustomPrompt = customPrompt;
-    console.log('New conversation session started:', currentSessionId, 'profile:', profile);
+    if (language) currentLanguage = language;
+    // The field the candidate is interviewing in — drives terminology, not code.
+    currentInterviewDomain = getInterviewDomain();
+    // Read keys from disk / managed secrets once per session, never per turn.
+    console.log(`[LLM] Providers ready: ${describeLlmConfig()}`);
+    console.log(
+        'New conversation session started:',
+        currentSessionId,
+        'profile:',
+        currentProfile,
+        'domain:',
+        currentInterviewDomain || '(from context)'
+    );
 
     // Save initial session with profile context
     if (profile) {
@@ -501,7 +690,11 @@ function saveConversationTurn(transcription, aiResponse) {
     };
 
     conversationHistory.push(conversationTurn);
-    console.log('Saved conversation turn:', conversationTurn);
+    console.log('[Session] Saved conversation turn', {
+        sessionId: currentSessionId,
+        transcriptionChars: conversationTurn.transcription.length,
+        responseChars: conversationTurn.ai_response.length,
+    });
 
     // Send to renderer to save in IndexedDB
     sendToRenderer('save-conversation-turn', {
@@ -541,7 +734,12 @@ function saveScreenAnalysis(prompt, response, model) {
     };
 
     screenAnalysisHistory.push(analysisEntry);
-    console.log('Saved screen analysis:', analysisEntry);
+    console.log('[Session] Saved screen analysis', {
+        sessionId: currentSessionId,
+        promptChars: String(prompt || '').length,
+        responseChars: analysisEntry.response.length,
+        model,
+    });
 
     // Send to renderer to save
     sendToRenderer('save-screen-analysis', {
@@ -573,20 +771,15 @@ function updateLastScreenAnalysis(response) {
 }
 
 function resolveSelfHealProvider(preferredProvider = null) {
-    if (preferredProvider === 'azure' || preferredProvider === 'groq') {
+    if (preferredProvider === 'gemini' || preferredProvider === 'groq') {
         return preferredProvider;
     }
-    if (hasAzureKey()) return 'azure';
+    if (hasLlmKey()) return 'llm';
     if (hasGroqKey()) return 'groq';
     return null;
 }
 
-async function schedulePostAnswerSelfHeal({
-    transcription,
-    response,
-    provider = null,
-    persistType = null,
-}) {
+async function schedulePostAnswerSelfHeal({ transcription, response, provider = null, persistType = null }) {
     const baseText = String(response || '').trim();
     if (!baseText) return;
     if (!isLikelyCodingPrompt(transcription || '', baseText)) return;
@@ -594,11 +787,20 @@ async function schedulePostAnswerSelfHeal({
     const healProvider = resolveSelfHealProvider(provider);
     if (!healProvider) return;
 
+    const seqAtSchedule = currentAnswerSeq;
+
     setTimeout(async () => {
         try {
             const healed = await maybeHumanizeCodeResponse(transcription || '', baseText, healProvider);
             const healedText = String(healed || '').trim();
             if (!healedText || healedText === baseText) return;
+
+            // A new question has been answered since — 'update-response' always
+            // targets the latest answer, so writing now would clobber it.
+            if (currentAnswerSeq !== seqAtSchedule) {
+                console.log('[SelfHeal] Dropping stale rewrite — a newer answer is on screen');
+                return;
+            }
 
             sendToRenderer('update-response', healedText);
 
@@ -680,13 +882,8 @@ function hasGroqKey() {
     return key && key.trim() !== '';
 }
 
-// helper to check if azure has been configured
-function hasAzureKey() {
-    const key = getEffectiveAzureApiKey();
-    const endpoint = getEffectiveAzureEndpoint();
-    const deployment = getEffectiveAzureDeployment();
-    return key && key.trim() !== '' && endpoint && endpoint.trim() !== '' && deployment && deployment.trim() !== '';
-}
+// helper to check if the Gemini LLM (AI Studio free tier) has been configured
+
 
 function compactFastContext(rawContext = '', maxChars = FAST_INTERVIEW_CUSTOM_CONTEXT_MAX_CHARS) {
     const normalized = String(rawContext || '')
@@ -703,14 +900,26 @@ function compactFastContext(rawContext = '', maxChars = FAST_INTERVIEW_CUSTOM_CO
     return `${normalized.slice(0, maxChars)}\n[context truncated for fast response]`;
 }
 
-function buildFastInterviewSystemPrompt(basePrompt, customContext = '') {
+/**
+ * Build the live prompt for one interview turn.
+ *
+ * The subject matter comes from the user-supplied domain and context; the
+ * answer shape comes from what the interviewer just asked. The same code path
+ * therefore serves a React concept question, a nursing scenario and a salary
+ * negotiation without any of them being special-cased here.
+ */
+function buildFastInterviewSystemPrompt(questionShape, customContext = '') {
+    const basePrompt = buildLiveInterviewPrompt({
+        domain: currentInterviewDomain,
+        languageCode: currentLanguage,
+        questionShape,
+    });
+
     const compactContext = compactFastContext(customContext);
-    const finalPrompt = compactContext 
-        ? `${basePrompt}\n\nUser context:\n${compactContext}`
-        : basePrompt;
-    
-    // Re-enforce the format rule at the end for maximum impact
-    return `${finalPrompt}\n\n**REMEMBER: 30 seconds max. 3-4 lines total. No paragraphs. No linking words like because/however/therefore. Format: idea + how + tradeoff.**`;
+    const finalPrompt = compactContext ? `${basePrompt}\n\nCandidate context:\n${compactContext}` : basePrompt;
+
+    // Re-enforce the shape at the end, where it has the most effect.
+    return `${finalPrompt}\n\n**REMEMBER: about ${questionShape.seconds} seconds of speech. Hold the shape above. Blank lines between parts. No paragraphs.**`;
 }
 
 function trimConversationHistoryForGemma(history, maxChars = 42000) {
@@ -733,74 +942,29 @@ function stripThinkingTags(text) {
     return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 }
 
-function formatInterviewAnswer(text = '', allowCode = false) {
-    const raw = String(text || '').replace(/\r/g, '').trim();
-    if (!raw) return '';
-    if (allowCode) return raw;
-    if (/`/.test(raw) || /===CODE_ISSUE_START===/i.test(raw) || /===CODE_ISSUE_END===/i.test(raw)) {
-        return raw;
-    }
-
-    const compact = raw.replace(/\n{2,}/g, '\n').replace(/[ \t]+/g, ' ').trim();
-    const sentences = compact
-        .split(/(?<=[.!?])\s+/)
-        .map(part => part.trim().replace(/^[-*•]\s+/, '').replace(/^\d+[.)]\s+/, ''))
-        .filter(Boolean);
-
-    if (sentences.length <= 1) {
-        return compact;
-    }
-
-    const fragments = [];
-
-    for (const sentence of sentences) {
-        const parts = sentence
-            .split(/\s*(?:,|;|—|--|\bbut\b|\bbecause\b|\bwhile\b|\band\b|\bso\b)\s+/i)
-            .map(part => part.trim())
-            .filter(Boolean);
-
-        for (const part of parts) {
-            if (part) {
-                const words = part.split(/\s+/).filter(Boolean);
-                const shortened = words.length > 6 ? words.slice(0, 6).join(' ') : part;
-                fragments.push(shortened);
-            }
-            if (fragments.length >= 2) break;
-        }
-
-        if (fragments.length >= 2) break;
-    }
-
-    return fragments.length ? fragments.join('\n\n') : compact;
+/**
+ * Format a spoken interview answer. Delegates to the shared implementation so
+ * the Gemini, Groq, Gemma, cloud and local paths cannot drift apart.
+ */
+function formatInterviewAnswer(text = '', questionShape = null) {
+    return formatSpokenInterviewAnswer(text, questionShape || getQuestionShape('general'));
 }
 
-function isLikelyCodingPrompt(transcription = '', response = '') {
-    const content = `${transcription}\n${response}`.toLowerCase();
-    const codingSignals = [
-        'leetcode',
-        'hacker',
-        'hackerearth',
-        'code',
-        'function',
-        'class ',
-        'array',
-        'string',
-        'linked list',
-        'binary tree',
-        'graph',
-        'dp',
-        'dynamic programming',
-        'complexity',
-        'time complexity',
-        'space complexity',
-        'python',
-        'java',
-        'cpp',
-        'javascript',
-    ];
+/**
+ * An explicit request to produce code. Bare mentions of "code", "array",
+ * "string" or "java" turn up constantly in ordinary interview conversation,
+ * and matching on those dragged every behavioural and conceptual answer
+ * through the code verifier — extra latency for nothing, on answers the
+ * verifier was never meant to touch.
+ */
+const EXPLICIT_CODING_REQUEST =
+    /\b(write (?:a |the )?(?:function|program|method|class|query|script)|implement (?:a|an|the)|code (?:this|it) up|leetcode|hackerrank|hackerearth|time complexity|space complexity|debug this|fix this code|coding round|reverse (?:a|the) (?:string|array|linked list))\b/;
 
-    if (codingSignals.some(signal => content.includes(signal))) return true;
-    return /```[\s\S]*```/.test(response);
+function isLikelyCodingPrompt(transcription = '', response = '') {
+    // Strongest signal: the model actually produced a fenced code block.
+    if (/```[\s\S]*```/.test(response)) return true;
+
+    return EXPLICIT_CODING_REQUEST.test(String(transcription || '').toLowerCase());
 }
 
 function buildCodeHumanizerMessages(transcription, draftResponse) {
@@ -864,6 +1028,7 @@ async function humanizeCodeResponseWithGroq(groqApiKey, model, transcription, dr
             top_p: 0.95,
             max_tokens: 1024,
         }),
+        signal: AbortSignal.timeout(45_000),
     });
 
     if (!response.ok) {
@@ -875,33 +1040,14 @@ async function humanizeCodeResponseWithGroq(groqApiKey, model, transcription, dr
     return (payload?.choices?.[0]?.message?.content || '').trim();
 }
 
-async function humanizeCodeResponseWithAzure(azureApiKey, azureEndpoint, azureDeployment, transcription, draftResponse) {
-    const apiVersion = '2025-04-01-preview';
-    let baseEndpoint = azureEndpoint.replace(/\/$/, '');
-    baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
-    const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${apiVersion}`;
-
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'api-key': azureApiKey,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            messages: buildCodeHumanizerMessages(transcription, draftResponse),
-            stream: false,
-            temperature: 1,
-            max_completion_tokens: 1024,
-        }),
+async function humanizeCodeResponseWithLlm(providers, transcription, draftResponse) {
+    return fetchLlmText({
+        providers,
+        messages: buildCodeHumanizerMessages(transcription, draftResponse),
+        temperature: 1,
+        maxTokens: OUTPUT_BUDGET.verify,
+        deeper: true,
     });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Azure humanizer failed (${response.status}): ${errorText}`);
-    }
-
-    const payload = await response.json();
-    return (payload?.choices?.[0]?.message?.content || '').trim();
 }
 
 async function verifyCodeResponseWithGroq(groqApiKey, model, transcription, candidateResponse) {
@@ -919,6 +1065,7 @@ async function verifyCodeResponseWithGroq(groqApiKey, model, transcription, cand
             top_p: 0.9,
             max_tokens: 1024,
         }),
+        signal: AbortSignal.timeout(45_000),
     });
 
     if (!response.ok) {
@@ -930,33 +1077,16 @@ async function verifyCodeResponseWithGroq(groqApiKey, model, transcription, cand
     return (payload?.choices?.[0]?.message?.content || '').trim();
 }
 
-async function verifyCodeResponseWithAzure(azureApiKey, azureEndpoint, azureDeployment, transcription, candidateResponse) {
-    const apiVersion = '2025-04-01-preview';
-    let baseEndpoint = azureEndpoint.replace(/\/$/, '');
-    baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
-    const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${apiVersion}`;
-
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'api-key': azureApiKey,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            messages: buildCodeVerifierMessages(transcription, candidateResponse),
-            stream: false,
-            temperature: 1,
-            max_completion_tokens: 1024,
-        }),
+// Verification is not latency-critical (it runs a second after the answer is
+// already on screen), so it gets a deeper reasoning budget than a spoken turn.
+async function verifyCodeResponseWithLlm(providers, transcription, candidateResponse) {
+    return fetchLlmText({
+        providers,
+        messages: buildCodeVerifierMessages(transcription, candidateResponse),
+        temperature: 1,
+        maxTokens: OUTPUT_BUDGET.verify,
+        deeper: true,
     });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Azure verifier failed (${response.status}): ${errorText}`);
-    }
-
-    const payload = await response.json();
-    return (payload?.choices?.[0]?.message?.content || '').trim();
 }
 
 async function maybeHumanizeCodeResponse(transcription, draftResponse, provider) {
@@ -973,12 +1103,10 @@ async function maybeHumanizeCodeResponse(transcription, draftResponse, provider)
             return verified || draftResponse;
         }
 
-        if (provider === 'azure') {
-            const azureApiKey = getEffectiveAzureApiKey();
-            const azureEndpoint = getEffectiveAzureEndpoint();
-            const azureDeployment = getEffectiveAzureDeployment();
-            if (!azureApiKey || !azureEndpoint || !azureDeployment) return draftResponse;
-            const verified = await verifyCodeResponseWithAzure(azureApiKey, azureEndpoint, azureDeployment, transcription, draftResponse);
+        if (provider === 'gemini') {
+            const providers = getLlmProviders();
+            if (!providers.length) return draftResponse;
+            const verified = await verifyCodeResponseWithLlm(providers, transcription, draftResponse);
             return verified || draftResponse;
         }
     } catch (error) {
@@ -1016,7 +1144,7 @@ async function transcribeCalibrationAudioSecure(accessToken, audioBase64, mimeTy
         const blob = new Blob([buffer], { type: mimeType || 'audio/webm;codecs=opus' });
         const formData = new FormData();
         formData.append('file', blob, 'calibration.webm');
-        formData.append('model', 'whisper-large-v3-turbo');
+        formData.append('model', process.env.GROQ_STT_MODEL || 'whisper-large-v3-turbo');
         formData.append('language', String(language || 'en-US').split('-')[0]);
         formData.append('response_format', 'text');
 
@@ -1024,6 +1152,7 @@ async function transcribeCalibrationAudioSecure(accessToken, audioBase64, mimeTy
             method: 'POST',
             headers: { Authorization: `Bearer ${groqKey}` },
             body: formData,
+            signal: AbortSignal.timeout(45_000),
         });
 
         if (response.ok) {
@@ -1043,6 +1172,7 @@ async function transcribeCalibrationAudioSecure(accessToken, audioBase64, mimeTy
                 'Content-Type': mimeType || 'audio/webm;codecs=opus',
             },
             body: buffer,
+            signal: AbortSignal.timeout(45_000),
         });
 
         if (response.ok) {
@@ -1058,36 +1188,26 @@ async function analyzeCalibrationProfileSecure(accessToken, prompt) {
     const resolved = await resolveProviderSecrets(accessToken, { consume: false, internal: true });
     const secrets = resolved?.data || {};
 
-    const azureKey = (secrets.azureApiKey || '').trim();
-    const azureEndpoint = (secrets.azureEndpoint || '').trim();
-    const azureDeployment = (secrets.azureDeployment || '').trim();
+    // Calibration runs once per session and is not latency-critical.
+    const providers = getLlmProviders();
 
-    if (azureKey && azureEndpoint && azureDeployment) {
-        let baseEndpoint = azureEndpoint.replace(/\/$/, '');
-        baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
-        const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=2025-04-01-preview`;
-
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'api-key': azureKey,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
+    if (providers.length) {
+        try {
+            const content = await fetchLlmText({
+                providers,
+                deeper: true,
                 messages: [
                     { role: 'system', content: 'You are a speech pattern analyst. Respond only with valid JSON.' },
                     { role: 'user', content: String(prompt || '') },
                 ],
                 temperature: 0.1,
-                max_completion_tokens: 2048,
-            }),
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            const content = data?.choices?.[0]?.message?.content || '';
+                maxTokens: 2048,
+                timeoutMs: 60_000,
+            });
             const parsed = extractJsonObject(content);
             if (parsed) return parsed;
+        } catch (error) {
+            console.warn('Gemini calibration analysis failed, falling back to Groq:', error.message);
         }
     }
 
@@ -1108,6 +1228,7 @@ async function analyzeCalibrationProfileSecure(accessToken, prompt) {
                 temperature: 0.1,
                 max_tokens: 2048,
             }),
+            signal: AbortSignal.timeout(60_000),
         });
 
         if (response.ok) {
@@ -1140,18 +1261,19 @@ async function sendToGroq(transcription) {
         return;
     }
 
-    console.log(`Sending to Groq (${modelToUse}):`, transcription.substring(0, 100) + '...');
+    console.log(`[Groq] Dispatching ${transcription.length} transcript chars (${modelToUse})`);
 
     groqConversationHistory.push({
         role: 'user',
         content: transcription.trim(),
     });
 
-    const isInterview = (currentProfile === 'interview' || currentProfile === 'frontend-interview' || !currentProfile);
+    const isInterview = isInterviewProfile(currentProfile);
+    const questionShape = classifyInterviewQuestion(transcription);
     const historyToSend = isInterview ? groqConversationHistory.slice(-FAST_INTERVIEW_GROQ_HISTORY_TURNS) : groqConversationHistory;
     const systemPrompt = isInterview
-        ? buildFastInterviewSystemPrompt(GROQ_FAST_SYSTEM_PROMPT, currentCustomPrompt)
-        : (currentSystemPrompt || 'You are a helpful assistant.');
+        ? buildFastInterviewSystemPrompt(questionShape, currentCustomPrompt)
+        : currentSystemPrompt || 'You are a helpful assistant.';
     const systemPromptChars = systemPrompt.length;
     const historyChars = historyToSend.reduce((sum, msg) => sum + (msg.content || '').length, 0);
     const requestStartedAt = Date.now();
@@ -1183,6 +1305,7 @@ async function sendToGroq(transcription) {
                 top_p: 0.85,
                 max_tokens: isInterview ? FAST_INTERVIEW_MAX_OUTPUT_TOKENS : 1024,
             }),
+            signal: AbortSignal.timeout(45_000),
         });
 
         if (!response.ok) {
@@ -1198,45 +1321,22 @@ async function sendToGroq(transcription) {
             return;
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
         let fullText = '';
         let isFirst = true;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') continue;
-
-                    try {
-                        const json = JSON.parse(data);
-                        const token = json.choices?.[0]?.delta?.content || '';
-                        if (token) {
-                            if (!firstTokenAt) firstTokenAt = Date.now();
-                            fullText += token;
-                            const displayText = formatInterviewAnswer(stripThinkingTags(fullText), false);
-                            if (displayText) {
-                                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
-                                isFirst = false;
-                            }
-                        }
-                    } catch (parseError) {
-                        // Skip invalid JSON chunks
-                    }
-                }
+        await consumeOpenAIStream(response.body, token => {
+            if (!firstTokenAt) firstTokenAt = Date.now();
+            fullText += token;
+            const displayText = formatInterviewAnswer(stripThinkingTags(fullText), questionShape);
+            if (displayText) {
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
+                isFirst = false;
             }
-        }
+        });
 
         const cleanedResponse = stripThinkingTags(fullText);
         const finalResponse = await maybeHumanizeCodeResponse(transcription, cleanedResponse, 'groq');
-        const interviewResponse = isInterview ? formatInterviewAnswer(finalResponse, false) : finalResponse;
+        const interviewResponse = isInterview ? formatInterviewAnswer(finalResponse, questionShape) : finalResponse;
         if (finalResponse && finalResponse !== cleanedResponse) {
             sendToRenderer(isFirst ? 'new-response' : 'update-response', interviewResponse);
             isFirst = false;
@@ -1268,7 +1368,7 @@ async function sendToGroq(transcription) {
         }
 
         const totalMs = Date.now() - requestStartedAt;
-        const ttftMs = firstTokenAt ? (firstTokenAt - requestStartedAt) : totalMs;
+        const ttftMs = firstTokenAt ? firstTokenAt - requestStartedAt : totalMs;
         console.log(
             `[Latency][Groq] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
         );
@@ -1288,61 +1388,37 @@ async function sendToGroq(transcription) {
 }
 
 // Compact interview prompt - keeps input tokens low for fast TTFT
-const FAST_INTERVIEW_SYSTEM_PROMPT = `You are a frontend interview assistant helping a software professional in India.
 
-**CRITICAL: 30 seconds max. NEVER write paragraphs. SPACE OUT YOUR POINTERS.**
-
-FORMAT (with BLANK LINES between):
-
-[POINTER 1 - Your choice]
-(One short line.)
-
-[POINTER 2 - Why you chose it]
-(One or two short lines.)
-
-[POINTER 3 - The tradeoff]
-(One or two short lines.)
-
-RULES:
-- Use SIMPLE words. NO jargon (don't say "structural alignment" say "column alignment"; don't say "scannability" say "easy to scan")
-- Give sentence STARTERS the user finishes (don't write full explanations)
-- BLANK LINES between pointers (don't make it look like a paragraph)
-- NO linking words: because, however, therefore, while, although
-- Sound like a person talking, not reading
-
-WRONG: "I would start by thinking about the requirement. This is a fintech flow where clarity matters more..."
-RIGHT:
-Mobile: Flexbox
-Why? One direction
-Tradeoff: Less control
-
-Think like a cheat sheet. Output ONLY the words the user will speak.`;
-const AZURE_FAST_SYSTEM_PROMPT = FAST_INTERVIEW_SYSTEM_PROMPT;
-const GROQ_FAST_SYSTEM_PROMPT = FAST_INTERVIEW_SYSTEM_PROMPT;
-
-async function sendToAzure(transcription) {
-    if (isAzureResponseInFlight) {
-        console.log('[TurnGate] Azure response already in flight, skipping transcript');
+/**
+ * @param {string} transcription   the interviewer's question
+ * @param {{replaceLast?: boolean}} [options]
+ *   replaceLast overwrites the answer already on screen instead of opening a
+ *   new window — used when the interviewer's question arrived in pieces.
+ */
+async function sendToGemini(transcription, options = {}) {
+    if (isGeminiResponseInFlight) {
+        console.log('[TurnGate] Gemini response already in flight, skipping transcript');
         return;
     }
 
-    const azureApiKey = getEffectiveAzureApiKey();
-    const azureEndpoint = getEffectiveAzureEndpoint();
-    const azureDeployment = getEffectiveAzureDeployment();
+    // Use the pool as already populated at session start. Refreshing it here
+    // would re-read the credentials file from disk on every single turn, right
+    // at the moment we are trying to get the request out.
+    const llmProviders = getLlmProviders();
 
-    if (!azureApiKey || !azureEndpoint || !azureDeployment) {
-        console.log('Azure OpenAI not fully configured, skipping Azure response');
+    if (!llmProviders.length) {
+        console.log('Gemini API key not configured, skipping Gemini response');
         return;
     }
 
     if (!transcription || transcription.trim() === '') {
-        console.log('Empty transcription, skipping Azure');
+        console.log('Empty transcription, skipping Gemini');
         return;
     }
 
-    console.log(`Sending to Azure OpenAI (${azureDeployment}):`, transcription.substring(0, 100) + '...');
+    console.log(`[LLM] Dispatching ${transcription.length} transcript chars via ${llmProviders[0].provider.label}:${llmProviders[0].model}`);
 
-    isAzureResponseInFlight = true;
+    isGeminiResponseInFlight = true;
 
     groqConversationHistory.push({
         role: 'user',
@@ -1351,8 +1427,14 @@ async function sendToAzure(transcription) {
 
     // For interview profile: send ZERO history — fastest TTFT (~1.5s vs 1.9s with 6 turns).
     // Each interview question is independent. For other profiles keep 4 turns for context.
-    const isInterview = (currentProfile === 'interview' || currentProfile === 'frontend-interview' || !currentProfile);
-    const historyToSend = isInterview ? [] : groqConversationHistory.slice(-4);
+    const isInterview = isInterviewProfile(currentProfile);
+    const questionShape = classifyInterviewQuestion(transcription);
+    // Interview turns normally send zero history — each question is
+    // independent and it is the single biggest TTFT saving. The exception is
+    // shapes that genuinely depend on earlier turns (schema for a coding
+    // question, requirements for a design question), where the answer is wrong
+    // without it and measurement showed no latency penalty.
+    const historyToSend = !isInterview || questionShape.needsHistory ? groqConversationHistory.slice(-4) : [];
 
     if (groqConversationHistory.length > 6) {
         groqConversationHistory = groqConversationHistory.slice(-6);
@@ -1360,99 +1442,89 @@ async function sendToAzure(transcription) {
 
     // Use compact prompt for fast TTFT; fall back to session prompt only for non-interview profiles
     const systemPrompt = isInterview
-        ? buildFastInterviewSystemPrompt(AZURE_FAST_SYSTEM_PROMPT, currentCustomPrompt)
-        : (currentSystemPrompt || AZURE_FAST_SYSTEM_PROMPT);
+        ? buildFastInterviewSystemPrompt(questionShape, currentCustomPrompt)
+        : currentSystemPrompt || buildFastInterviewSystemPrompt(questionShape, currentCustomPrompt);
     const systemPromptChars = systemPrompt.length;
     const historyChars = historyToSend.reduce((sum, msg) => sum + (msg.content || '').length, 0);
     const requestStartedAt = Date.now();
     let firstTokenAt = 0;
 
-    logLatencyStart('Azure', {
-        deployment: azureDeployment,
+    logLatencyStart('LLM', {
+        model: llmProviders[0].model,
         promptChars: systemPromptChars,
         historyChars,
         isInterview,
     });
 
     try {
-        const apiVersion = '2025-04-01-preview';
-        let baseEndpoint = azureEndpoint.replace(/\/$/, '');
-        baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
-        const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${apiVersion}`;
-        const reasoningEffort = getAzureReasoningEffort(azureDeployment);
-
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'api-key': azureApiKey,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    ...historyToSend,
-                    { role: 'user', content: transcription.trim() },
-                ],
-                stream: true,
-                temperature: 1,
-                max_completion_tokens: 350,
-                ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-            }),
+        // Fails over across keys on 429, then across models, then across
+        // providers — all without backoff. See llmKeyPool / llmProvider.
+        const { response, keyIndex, attempts, provider: usedProvider, model: usedModel } = await requestLlm({
+            providers: llmProviders,
+            messages: [{ role: 'system', content: systemPrompt }, ...historyToSend, { role: 'user', content: transcription.trim() }],
+            stream: true,
+            temperature: 1,
+            // Reasoning tokens are drawn from this same budget, so it carries
+            // headroom: too small and a thinking model returns nothing at all.
+            maxTokens: OUTPUT_BUDGET.live,
+            live: true,
+            timeoutMs: 12_000,
         });
+
+        if (attempts > 1) {
+            console.log(`[LLM] Failed over to key #${keyIndex + 1} after ${attempts - 1} rate-limited attempt(s)`);
+        }
+        if (usedModel !== llmProviders[0].model) {
+            console.log(`[LLM] Answered with ${usedProvider}:${usedModel} (${llmProviders[0].model} unavailable)`);
+        }
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('Azure OpenAI API error:', response.status, errorText);
-            logLatencyError('Azure', requestStartedAt, {
+            console.error('LLM API error:', response.status, errorText);
+            logLatencyError('LLM', requestStartedAt, {
                 status: response.status,
                 promptChars: systemPromptChars,
                 historyChars,
                 isInterview,
             });
-            sendToRenderer('update-status', `Azure error: ${response.status}`);
+            sendToRenderer('update-status', describeLlmError(getProvider(usedProvider), response.status, errorText));
             return;
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
         let fullText = '';
-        let isFirst = true;
+        // A continuation writes over the answer already on screen, so the very
+        // first token is an update rather than a new response.
+        let isFirst = !options.replaceLast;
+        let lastDisplayed = '';
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') continue;
-
-                    try {
-                        const json = JSON.parse(data);
-                        const token = json.choices?.[0]?.delta?.content || '';
-                        if (token) {
-                            if (!firstTokenAt) firstTokenAt = Date.now();
-                            fullText += token;
-                            const displayText = stripThinkingTags(fullText);
-                            if (displayText) {
-                                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
-                                isFirst = false;
-                            }
-                        }
-                    } catch (parseError) {
-                        // Skip invalid JSON chunks
-                    }
-                }
+        await consumeOpenAIStream(response.body, token => {
+            if (!firstTokenAt) firstTokenAt = Date.now();
+            fullText += token;
+            // Only pay for the strip when a tag could actually be present —
+            // this runs on every token over the whole accumulated answer.
+            const displayText = fullText.includes('<') ? stripThinkingTags(fullText) : fullText;
+            if (displayText) {
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', displayText);
+                lastDisplayed = displayText;
+                isFirst = false;
             }
-        }
+        });
 
         const cleanedResponse = stripThinkingTags(fullText);
-        const finalResponse = await maybeHumanizeCodeResponse(transcription, cleanedResponse, 'azure');
-        const interviewResponse = isInterview ? formatInterviewAnswer(finalResponse, false) : finalResponse;
-        if (finalResponse && finalResponse !== cleanedResponse) {
+
+        // The code verifier is NOT awaited here. It only fires on coding
+        // prompts, it is a second non-streaming round trip, and
+        // schedulePostAnswerSelfHeal below already runs exactly the same pass a
+        // second later — awaiting it held the turn gate open (blocking the next
+        // question) to do work that was about to be repeated anyway.
+        const finalResponse = cleanedResponse;
+        const interviewResponse = isInterview ? formatInterviewAnswer(finalResponse, questionShape) : finalResponse;
+
+        // Show the formatted answer whenever it differs from what actually
+        // reached the screen. The old check compared against the pre-humanizer
+        // text, so for every non-coding answer the formatted version was
+        // computed, stored and then never displayed.
+        if (interviewResponse && interviewResponse !== lastDisplayed) {
             sendToRenderer(isFirst ? 'new-response' : 'update-response', interviewResponse);
             isFirst = false;
         }
@@ -1460,7 +1532,7 @@ async function sendToAzure(transcription) {
         const inputChars = systemPromptChars + historyChars;
         const outputChars = finalResponse.length;
 
-        incrementCharUsage('azure', azureDeployment, inputChars + outputChars);
+        incrementCharUsage(usedProvider, usedModel, inputChars + outputChars);
 
         if (finalResponse) {
             groqConversationHistory.push({
@@ -1477,58 +1549,53 @@ async function sendToAzure(transcription) {
             schedulePostAnswerSelfHeal({
                 transcription,
                 response: interviewResponse,
-                provider: 'azure',
+                provider: 'gemini',
                 persistType: 'conversation',
             });
         }
 
         const totalMs = Date.now() - requestStartedAt;
-        const ttftMs = firstTokenAt ? (firstTokenAt - requestStartedAt) : totalMs;
+        const ttftMs = firstTokenAt ? firstTokenAt - requestStartedAt : totalMs;
         console.log(
-            `[Latency][Azure] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
+            `[Latency][Gemini] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
         );
 
-        console.log(`Azure OpenAI response completed (${azureDeployment})`);
+        console.log(`LLM response completed (${usedProvider}:${usedModel})`);
         sendToRenderer('update-status', 'Listening...');
     } catch (error) {
-        console.error('Error calling Azure OpenAI API:', error);
-        logLatencyError('Azure', requestStartedAt, {
+        console.error('Error calling LLM API:', error);
+        logLatencyError('LLM', requestStartedAt, {
             message: error.message || 'request_failed',
             promptChars: systemPromptChars,
             historyChars,
             isInterview,
         });
-        sendToRenderer('update-status', 'Azure error: ' + error.message);
+        sendToRenderer('update-status', 'LLM error: ' + error.message);
     } finally {
-        isAzureResponseInFlight = false;
+        isGeminiResponseInFlight = false;
         if (pendingInterviewerTranscript) {
             const queuedTranscript = pendingInterviewerTranscript;
+            const queuedReplaces = pendingReplacesLast;
             pendingInterviewerTranscript = '';
-            console.log('[TurnGate] Processing queued interviewer transcript');
+            pendingReplacesLast = false;
+            console.log(queuedReplaces ? '[TurnGate] Re-answering the full question in place' : '[TurnGate] Processing queued interviewer transcript');
             sendToRenderer('update-status', 'Processing...');
-            sendToAzure(queuedTranscript);
+            sendToGemini(queuedTranscript, { replaceLast: queuedReplaces });
         }
     }
 }
 
-async function sendImageToAzure(imagePayload, prompt, options = {}) {
+async function sendImageToGemini(imagePayload, prompt, options = {}) {
     const skipPostProcessing = Boolean(options.skipPostProcessing);
     const mode = String(options.mode || '').toLowerCase();
     const isDebugMode = mode === 'debug';
-    const azureApiKey = getEffectiveAzureApiKey();
-    const azureEndpoint = getEffectiveAzureEndpoint();
-    const azureDeployment = getEffectiveAzureDeployment();
+    const llmProviders = getLlmProviders();
 
-    if (!azureApiKey || !azureEndpoint || !azureDeployment) {
-        return { success: false, error: 'Azure OpenAI not fully configured' };
+    if (!llmProviders.length) {
+        return { success: false, error: 'No LLM provider is configured' };
     }
 
     try {
-        const apiVersion = '2025-04-01-preview';
-        let baseEndpoint = azureEndpoint.replace(/\/$/, '');
-        baseEndpoint = baseEndpoint.replace(/\/openai\/(responses|deployments|completions).*$/i, '');
-        const url = `${baseEndpoint}/openai/deployments/${azureDeployment}/chat/completions?api-version=${apiVersion}`;
-
         const systemInstruction = isDebugMode
             ? `You are a debugging assistant for coding interview failed test screenshots.
 
@@ -1558,7 +1625,9 @@ Rules:
     For MCQ questions: Answer with ONLY the letter/option, nothing else.
     For code problems: Provide complete working code for the primary problem.
     For math: Just the final answer.
-    For explanations: Keep it to 1-2 sentences max.
+    For explanations: answer as 2-4 short pointers, each on its own line starting with "- ".
+    Each pointer is one speakable line of about 12 words. Never a paragraph, never one long sentence.
+    Explain any technical term in the same line, in plain words. At most one metric per pointer.
 
     Anti-plagiarism coding style:
     - Avoid canonical editorial structure when a valid alternative exists.
@@ -1572,28 +1641,24 @@ Rules:
 
     Match the simplicity of the question. Don't over-engineer or add unnecessary code.`;
 
-        console.log(`\n[AZURE VISION] Sending image to Azure OpenAI (${azureDeployment})...`);
+        console.log(`\n[VISION] Sending ${Array.isArray(imagePayload) ? imagePayload.length : 1} image(s) to ${llmProviders[0].provider.label}...`);
 
         const imageDataList = Array.isArray(imagePayload) ? imagePayload : [imagePayload];
-        
+
         // Log image metadata
-        console.log(`[AZURE VISION] Processing ${imageDataList.length} image(s)`);
+        console.log(`[VISION] Processing ${imageDataList.length} image(s)`);
         for (let i = 0; i < imageDataList.length; i++) {
             const imgBase64 = imageDataList[i];
             const sizeKB = (imgBase64.length / 1024).toFixed(2);
-            console.log(`[AZURE VISION]   Image ${i + 1}: ${sizeKB} KB`);
+            console.log(`[VISION]   Image ${i + 1}: ${sizeKB} KB`);
         }
 
         const userContent = imageDataList
-            .filter((img) => typeof img === 'string' && img.length > 100)
-            .map((img) => {
-                // Log the first 50 characters to diagnose format issues
-                const first50 = img.slice(0, 50);
-                console.log(`[AZURE VISION] Image first 50 chars: "${first50}"`);
-                
+            .filter(img => typeof img === 'string' && img.length > 100)
+            .map(img => {
                 // Check if it already has data URI prefix (double encoding issue)
                 if (img.startsWith('data:')) {
-                    console.error('[AZURE VISION] ⚠ WARNING: Base64 already has data: prefix! This will cause double encoding. Removing...');
+                    console.error('[VISION] ⚠ WARNING: Base64 already has data: prefix! This will cause double encoding. Removing...');
                     const cleanBase64 = img.replace(/^data:[^;]*;base64,/, '');
                     return {
                         type: 'image_url',
@@ -1602,12 +1667,14 @@ Rules:
                         },
                     };
                 }
-                
+
                 // Check if starts with JPEG magic bytes
                 if (!img.startsWith('/9j/')) {
-                    console.error(`[AZURE VISION] ⚠ WARNING: Base64 doesn't start with "/9j/" (JPEG magic bytes). Starts with: "${img.slice(0, 10)}"`);
+                    console.error(
+                        `[VISION] ⚠ WARNING: Base64 doesn't start with "/9j/" (JPEG magic bytes). Starts with: "${img.slice(0, 10)}"`
+                    );
                 }
-                
+
                 return {
                     type: 'image_url',
                     image_url: {
@@ -1620,78 +1687,58 @@ Rules:
             return { success: false, error: 'No valid image payload provided' };
         }
 
-        console.log(`[AZURE VISION] Prompt: "${prompt?.slice(0, 100)}${prompt && prompt.length > 100 ? '...' : ''}"`);
-        userContent.push({ type: 'text', text: String(prompt || '') });
+        console.log(`[VISION] Prompt length: ${String(prompt || '').length} chars`);
 
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'api-key': azureApiKey,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                messages: [
-                    { role: 'system', content: systemInstruction },
-                    {
-                        role: 'user',
-                        content: userContent,
-                    },
-                ],
-                stream: true,
-                temperature: 1,
-                max_completion_tokens: 1024,
-            }),
+        // The instruction text goes in the SYSTEM message, ahead of the images,
+        // rather than trailing them in the user turn. Providers cache on a
+        // stable prefix with a minimum length (~1024 tokens); with the prompt
+        // behind the varying images the prefix was only the ~300-token system
+        // instruction and never qualified. Front-loading it makes the prefix
+        // ~1100 tokens, so repeat screenshots bill it at the cached rate.
+        const { response, keyIndex, attempts, provider: usedProvider, model: usedModel } = await requestLlm({
+            providers: llmProviders,
+            messages: [
+                { role: 'system', content: `${systemInstruction}
+
+${String(prompt || '')}` },
+                {
+                    role: 'user',
+                    content: userContent,
+                },
+            ],
+            stream: true,
+            temperature: 1,
+            maxTokens: OUTPUT_BUDGET.vision,
+            // Screenshots decide correctness (right MCQ letter, compiling code)
+            // and the user is reading a screen, so depth beats latency here.
+            deeper: true,
+            timeoutMs: 60_000,
         });
+
+        if (attempts > 1) {
+            console.log(`[VISION] Failed over to key #${keyIndex + 1} after ${attempts - 1} attempt(s)`);
+        }
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('[AZURE VISION] API error:', response.status, errorText);
-            return { success: false, error: `Azure error: ${response.status}` };
+            console.error('[VISION] API error:', response.status, errorText);
+            return { success: false, error: describeLlmError(getProvider(usedProvider), response.status, errorText) };
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
         let fullText = '';
         let isFirst = true;
 
-        console.log('[AZURE VISION] Receiving response from Azure...');
+        console.log(`[VISION] Receiving response from ${usedProvider}:${usedModel}...`);
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        await consumeOpenAIStream(response.body, token => {
+            fullText += token;
+            sendToRenderer(isFirst ? 'new-response' : 'update-response', formatInterviewAnswer(fullText, getQuestionShape('coding')));
+            isFirst = false;
+        });
 
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n').filter(line => line.trim() !== '');
+        console.log(`[VISION] Response complete: ${fullText.length} chars`);
 
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') continue;
-
-                    try {
-                        const json = JSON.parse(data);
-                        const token = json.choices?.[0]?.delta?.content || '';
-                        if (token) {
-                            fullText += token;
-                            sendToRenderer(isFirst ? 'new-response' : 'update-response', formatInterviewAnswer(fullText, false));
-                            isFirst = false;
-                        }
-                    } catch (parseError) {
-                        // Skip invalid JSON chunks
-                    }
-                }
-            }
-        }
-
-        // Log extracted text/analysis from Azure Vision
-        console.log('\n[AZURE VISION OCR/ANALYSIS OUTPUT]');
-        console.log('─'.repeat(60));
-        console.log(fullText);
-        console.log('─'.repeat(60) + '\n');
-
-        let finalResponse = skipPostProcessing
-            ? fullText
-            : await maybeHumanizeCodeResponse(prompt || '', fullText, 'azure');
+        let finalResponse = skipPostProcessing ? fullText : await maybeHumanizeCodeResponse(prompt || '', fullText, 'gemini');
 
         if (isDebugMode && !/===CODE_ISSUE_START===/i.test(finalResponse || '')) {
             const safeBody = String(finalResponse || fullText || '').trim();
@@ -1705,27 +1752,27 @@ Rules:
             isFirst = false;
         }
 
-        console.log(`[AZURE VISION] Response completed (${azureDeployment})`);
-        saveScreenAnalysis(prompt, finalResponse || fullText, azureDeployment);
+        console.log(`[VISION] Response completed (${usedProvider}:${usedModel})`);
+        saveScreenAnalysis(prompt, finalResponse || fullText, usedModel);
 
         if (!skipPostProcessing) {
             schedulePostAnswerSelfHeal({
                 transcription: prompt || '',
                 response: finalResponse || fullText,
-                provider: 'azure',
+                provider: 'gemini',
                 persistType: 'screen',
             });
         }
 
-        return { success: true, text: finalResponse || fullText, model: azureDeployment };
+        return { success: true, text: finalResponse || fullText, model: usedModel };
     } catch (error) {
-        console.error('[AZURE VISION] Error sending image to Azure:', error);
+        console.error('[VISION] Error sending image:', error);
         return { success: false, error: error.message };
     }
 }
 
 async function sendToGemma(transcription) {
-    const apiKey = getEffectiveApiKey();
+    const apiKey = acquireGeminiKey();
     if (!apiKey) {
         console.log('No Gemini API key configured');
         return;
@@ -1736,21 +1783,19 @@ async function sendToGemma(transcription) {
         return;
     }
 
-    console.log('Sending to Gemma:', transcription.substring(0, 100) + '...');
+    console.log(`[Gemma] Dispatching ${transcription.length} transcript chars`);
 
     groqConversationHistory.push({
         role: 'user',
         content: transcription.trim(),
     });
 
-    const isInterview = (currentProfile === 'interview' || currentProfile === 'frontend-interview' || !currentProfile);
-    const trimmedHistory = trimConversationHistoryForGemma(
-        groqConversationHistory,
-        isInterview ? FAST_INTERVIEW_GEMMA_HISTORY_CHARS : 42000
-    );
+    const isInterview = isInterviewProfile(currentProfile);
+    const questionShape = classifyInterviewQuestion(transcription);
+    const trimmedHistory = trimConversationHistoryForGemma(groqConversationHistory, isInterview ? FAST_INTERVIEW_GEMMA_HISTORY_CHARS : 42000);
     const systemPrompt = isInterview
-        ? buildFastInterviewSystemPrompt(FAST_INTERVIEW_SYSTEM_PROMPT, currentCustomPrompt)
-        : (currentSystemPrompt || 'You are a helpful assistant.');
+        ? buildFastInterviewSystemPrompt(questionShape, currentCustomPrompt)
+        : currentSystemPrompt || 'You are a helpful assistant.';
     const systemPromptChars = systemPrompt.length;
     const historyChars = trimmedHistory.reduce((sum, msg) => sum + (msg.content || '').length, 0);
     const requestStartedAt = Date.now();
@@ -1790,7 +1835,7 @@ async function sendToGemma(transcription) {
             if (chunkText) {
                 if (!firstTokenAt) firstTokenAt = Date.now();
                 fullText += chunkText;
-                sendToRenderer(isFirst ? 'new-response' : 'update-response', formatInterviewAnswer(fullText, false));
+                sendToRenderer(isFirst ? 'new-response' : 'update-response', formatInterviewAnswer(fullText, questionShape));
                 isFirst = false;
             }
         }
@@ -1801,7 +1846,7 @@ async function sendToGemma(transcription) {
         incrementCharUsage('gemini', 'gemma-3-27b-it', inputChars + outputChars);
 
         if (fullText.trim()) {
-            const interviewResponse = isInterview ? formatInterviewAnswer(fullText, false) : fullText;
+            const interviewResponse = isInterview ? formatInterviewAnswer(fullText, questionShape) : fullText;
             groqConversationHistory.push({
                 role: 'assistant',
                 content: interviewResponse.trim(),
@@ -1821,7 +1866,7 @@ async function sendToGemma(transcription) {
         }
 
         const totalMs = Date.now() - requestStartedAt;
-        const ttftMs = firstTokenAt ? (firstTokenAt - requestStartedAt) : totalMs;
+        const ttftMs = firstTokenAt ? firstTokenAt - requestStartedAt : totalMs;
         console.log(
             `[Latency][Gemma] ttftMs=${ttftMs} totalMs=${totalMs} promptChars=${systemPromptChars} historyChars=${historyChars} isInterview=${isInterview}`
         );
@@ -1870,7 +1915,10 @@ async function initializeLegacyLiveSession(apiKey, customPrompt = '', profile = 
     // Load voice profile from storage for style adaptation
     const { getVoiceProfile } = require('../storage');
     currentVoiceProfile = getVoiceProfile();
-    const systemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled, currentVoiceProfile);
+    const systemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled, currentVoiceProfile, {
+        domain: currentInterviewDomain,
+        languageCode: currentLanguage,
+    });
     currentSystemPrompt = systemPrompt; // Store for Groq
 
     // Initialize new conversation session only on first connect
@@ -1897,14 +1945,14 @@ async function initializeLegacyLiveSession(apiKey, customPrompt = '', profile = 
                         }
                     }
 
-                    // Fire Azure as soon as user's speech turn ends — don't wait
+                    // Fire Gemini as soon as user's speech turn ends — don't wait
                     // for Gemini to generate any response (we don't use it).
                     if (message.serverContent?.turnComplete) {
                         if (currentTranscription.trim() !== '') {
                             const transcriptionToSend = currentTranscription;
                             currentTranscription = '';
-                            if (hasAzureKey()) {
-                                sendToAzure(transcriptionToSend);
+                            if (hasLlmKey()) {
+                                sendToGemini(transcriptionToSend);
                             } else if (hasGroqKey()) {
                                 sendToGroq(transcriptionToSend);
                             } else {
@@ -2193,7 +2241,7 @@ async function sendImageToLegacyHttp(base64Data, prompt) {
     // Get available model based on rate limits
     const model = getAvailableModel();
 
-    const apiKey = getEffectiveApiKey();
+    const apiKey = acquireGeminiKey();
     if (!apiKey) {
         return { success: false, error: 'No API key configured' };
     }
@@ -2221,7 +2269,9 @@ async function sendImageToLegacyHttp(base64Data, prompt) {
     For MCQ questions: Answer with ONLY the letter/option, nothing else.
     For code problems: Provide complete working code for the primary problem.
     For math: Just the final answer.
-    For explanations: Keep it to 1-2 sentences max.
+    For explanations: answer as 2-4 short pointers, each on its own line starting with "- ".
+    Each pointer is one speakable line of about 12 words. Never a paragraph, never one long sentence.
+    Explain any technical term in the same line, in plain words. At most one metric per pointer.
 
     Anti-plagiarism coding style:
     - Avoid canonical editorial structure when a valid alternative exists.
@@ -2260,7 +2310,7 @@ async function sendImageToLegacyHttp(base64Data, prompt) {
             }
         }
 
-        const finalResponse = await maybeHumanizeCodeResponse(prompt || '', fullText, 'azure');
+        const finalResponse = await maybeHumanizeCodeResponse(prompt || '', fullText, 'gemini');
         if (finalResponse && finalResponse !== fullText) {
             sendToRenderer(isFirst ? 'new-response' : 'update-response', finalResponse);
             isFirst = false;
@@ -2363,15 +2413,15 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         return false;
     });
 
-    ipcMain.handle('initialize-azure', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
+    ipcMain.handle('initialize-gemini', async (event, apiKey, customPrompt, profile = 'interview', language = 'en-US') => {
         currentProviderMode = 'token';
         clearTrialSessionTimeout();
 
         try {
             ensureStringWithinLimit(apiKey, 256, 'Access token');
             ensureStringWithinLimit(customPrompt || '', 16_000, 'Custom prompt');
-            enforceIpcRateLimit(event, 'auth.initialize-azure', RATE_LIMIT_POLICIES.initializeAzure);
-            enforceTokenScopedLimit('auth.initialize-azure.token', apiKey, RATE_LIMIT_POLICIES.initializeAzure);
+            enforceIpcRateLimit(event, 'auth.initialize-gemini', RATE_LIMIT_POLICIES.initializeGemini);
+            enforceTokenScopedLimit('auth.initialize-gemini.token', apiKey, RATE_LIMIT_POLICIES.initializeGemini);
             const resolved = await resolveProviderSecrets(apiKey, { consume: true });
             const maxInterviews = Number(resolved?.data?.maxInterviews || 0);
             if (maxInterviews === 3) {
@@ -2383,14 +2433,14 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
             return { success: false, error: error.message || 'Invalid access token or Supabase unavailable' };
         }
 
-        if (!hasAzureKey()) {
-            sendToRenderer('update-status', 'Azure OpenAI credentials are not configured');
-            return { success: false, error: 'Azure OpenAI credentials are not configured' };
+        if (!hasLlmKey()) {
+            sendToRenderer('update-status', 'Gemini API key is not configured');
+            return { success: false, error: 'Gemini API key is not configured' };
         }
 
         const groqKey = getEffectiveGroqApiKey();
         if (!groqKey) {
-            console.error('[Init] Azure mode requires a Groq API key for STT — add it in settings');
+            console.error('[Init] Live mode requires a Groq API key for STT — add it in settings');
             sendToRenderer('update-status', 'Groq STT key not configured in Supabase');
             return { success: false, error: 'Groq STT key not configured in Supabase' };
         }
@@ -2398,10 +2448,15 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         currentProfile = profile;
         currentCustomPrompt = customPrompt;
         const googleSearchEnabled = false;
-        currentSystemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled, null);
-        initializeNewSession(profile, customPrompt);
+        currentLanguage = language;
+        currentInterviewDomain = getInterviewDomain();
+        currentSystemPrompt = getSystemPrompt(profile, customPrompt, googleSearchEnabled, null, {
+            domain: currentInterviewDomain,
+            languageCode: currentLanguage,
+        });
+        initializeNewSession(profile, customPrompt, language);
 
-        speechStt.startSpeechSTT(groqKey, language, (transcription) => {
+        speechStt.startSpeechSTT(groqKey, language, transcription => {
             if (isTrialSessionTimedOut) {
                 sendToRenderer('update-status', 'User timedout');
                 return;
@@ -2409,25 +2464,34 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
             const gate = shouldDispatchInterviewerTurn(transcription);
             if (!gate.accept) {
-                console.log(`[TurnGate] Ignored transcript (${gate.reason}):`, String(transcription || '').slice(0, 120));
+                console.log(`[TurnGate] Ignored transcript (${gate.reason}), ${String(transcription || '').length} chars`);
                 sendToRenderer('update-status', 'Listening...');
                 return;
             }
 
-            if (isAzureResponseInFlight) {
-                pendingInterviewerTranscript = String(transcription || '').trim();
-                console.log('[TurnGate] Queued interviewer transcript while response is in-flight');
+            const turn = absorbIntoCurrentTurn(transcription);
+
+            if (isGeminiResponseInFlight) {
+                // A continuation supersedes the answer being written right now:
+                // when it lands it must overwrite that window, not open a new one.
+                pendingInterviewerTranscript = turn.text;
+                pendingReplacesLast = turn.isContinuation;
+                console.log(
+                    turn.isContinuation
+                        ? '[TurnGate] Interviewer still talking — will re-answer the full question in place'
+                        : '[TurnGate] Queued interviewer transcript while response is in-flight'
+                );
                 sendToRenderer('update-status', 'Listening...');
                 return;
             }
 
             sendToRenderer('update-status', 'Processing...');
-            sendToAzure(transcription);
+            sendToGemini(turn.text, { replaceLast: turn.isContinuation });
         });
         providerSessionRef.stopSTT = () => speechStt.stopSpeechSTT();
         providerSessionRef.current = null;
         sendToRenderer('update-status', 'Listening...');
-        console.log('[Init] Groq Whisper STT started — Azure OpenAI will handle responses');
+        console.log(`[Init] Groq Whisper STT started — ${describeLlmConfig()} will handle responses`);
         return { success: true };
     });
 
@@ -2440,6 +2504,10 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         if (isTrialSessionTimedOut) {
             return { success: false, error: 'User timedout' };
         }
+
+        enforceIpcRateLimit(event, 'session.send-audio-content', RATE_LIMIT_POLICIES.sendAudio);
+        ensureStringWithinLimit(data, 131_072, 'Audio chunk');
+        ensureStringWithinLimit(mimeType || '', 100, 'Audio MIME type');
 
         // Azure STT path — push audio to speech-to-text buffer
         if (speechStt.isSpeechSTTActive()) {
@@ -2454,6 +2522,10 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         if (isTrialSessionTimedOut) {
             return { success: false, error: 'User timedout' };
         }
+
+        enforceIpcRateLimit(event, 'session.send-mic-audio-content', RATE_LIMIT_POLICIES.sendAudio);
+        ensureStringWithinLimit(data, 131_072, 'Audio chunk');
+        ensureStringWithinLimit(mimeType || '', 100, 'Audio MIME type');
 
         // Azure STT path — mic audio also goes to speech-to-text buffer
         if (speechStt.isSpeechSTTActive()) {
@@ -2471,7 +2543,8 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
 
             enforceIpcRateLimit(event, 'session.send-image-content', RATE_LIMIT_POLICIES.sendImage);
             const imageList = Array.isArray(images) && images.length > 0 ? images : [data];
-            const validImages = imageList.filter((img) => typeof img === 'string' && img.trim().length > 0);
+            if (imageList.length > 3) return { success: false, error: 'Too many images' };
+            const validImages = imageList.filter(img => typeof img === 'string' && img.trim().length > 0);
 
             if (!validImages.length) {
                 console.error('Invalid image data received');
@@ -2479,23 +2552,27 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
             }
 
             for (const imageBase64 of validImages) {
+                ensureStringWithinLimit(imageBase64, 12_000_000, 'Image payload');
                 const buffer = Buffer.from(imageBase64, 'base64');
-                if (buffer.length < 1000) {
-                    console.error(`Image buffer too small: ${buffer.length} bytes`);
-                    return { success: false, error: 'Image buffer too small' };
+                if (buffer.length < 1000 || buffer.length > 8_000_000) {
+                    console.error(`Invalid image size: ${buffer.length} bytes`);
+                    return { success: false, error: 'Invalid image size' };
                 }
             }
 
+            const safePrompt = ensureStringWithinLimit(prompt || '', 16_000, 'Image prompt');
+            const safeMode = ensureStringWithinLimit(mode || '', 32, 'Image mode');
+
             process.stdout.write('!');
 
-            if (!hasAzureKey()) {
-                return { success: false, error: 'Azure OpenAI credentials are not configured' };
+            if (!hasLlmKey()) {
+                return { success: false, error: 'Gemini API key is not configured' };
             }
 
-            const isDebugMode = String(mode || '').toLowerCase() === 'debug';
-            const result = await sendImageToAzure(validImages, prompt, {
+            const isDebugMode = safeMode.toLowerCase() === 'debug';
+            const result = await sendImageToGemini(validImages, safePrompt, {
                 skipPostProcessing: isDebugMode,
-                mode,
+                mode: safeMode,
             });
             return result;
         } catch (error) {
@@ -2513,6 +2590,7 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         if (!text || typeof text !== 'string' || text.trim().length === 0) {
             return { success: false, error: 'Invalid text message' };
         }
+        const safeText = ensureStringWithinLimit(text, 32_000, 'Text message').trim();
 
         // Resolve the active profile — prefer the passed-in profile, then
         // fall back to the current session profile, then to 'exam' for typed
@@ -2527,31 +2605,36 @@ function setupProviderRuntimeIpcHandlers(providerSessionRef) {
         }
 
         // Always keep currentSystemPrompt in sync with the resolved profile
-        // so Groq / Azure / Gemma use the right instructions.
+        // so Groq / Gemini / Gemma use the right instructions.
         if (!currentSystemPrompt || profileChanged) {
             const googleSearchEnabled = true; // conservative default for text queries
-            let systemPrompt = getSystemPrompt(resolvedProfile, currentCustomPrompt || '', googleSearchEnabled, currentVoiceProfile);
-            
+            let systemPrompt = getSystemPrompt(resolvedProfile, currentCustomPrompt || '', googleSearchEnabled, currentVoiceProfile, {
+                domain: currentInterviewDomain,
+                languageCode: currentLanguage,
+            });
+
             // Detect if this is an interview-style question and enforce strict pointer format
-            const isInterviewStyleQuestion = /\b(how|why|explain|walk me through|compare|difference|implement|build|design|approach)\b/i.test(text);
+            const isInterviewStyleQuestion = /\b(how|why|explain|walk me through|compare|difference|implement|build|design|approach)\b/i.test(
+                safeText
+            );
             if (isInterviewStyleQuestion && !systemPrompt.includes('**CRITICAL: Your answer must be speakable in 30 seconds')) {
                 // Append strict format enforcement for interview questions (spaced pointers, simple language)
                 systemPrompt += `\n\n**INTERVIEW QUESTION DETECTED - STRICT FORMAT:**\n\n[POINTER 1]\n(One short line. Simple words.)\n\n[POINTER 2]\n(One or two short lines.)\n\n[POINTER 3]\n(One or two short lines.)\n\nUse BLANK LINES between pointers. Use SIMPLE words (no jargon). Give sentence starters, not full explanations. NO because/however/therefore. 30 seconds max.`;
             }
-            
+
             currentSystemPrompt = systemPrompt;
         }
 
-        // Access-token mode (Azure only)
+        // Access-token mode (Gemini only)
         try {
-            console.log('Sending text message via access token mode:', text, '| profile:', resolvedProfile);
+            console.log(`[Text] Dispatching ${safeText.length} chars | profile: ${resolvedProfile}`);
 
-            if (hasAzureKey()) {
-                sendToAzure(text.trim());
+            if (hasLlmKey()) {
+                sendToGemini(safeText);
                 return { success: true };
             }
 
-            return { success: false, error: 'Azure OpenAI credentials are not configured' };
+            return { success: false, error: 'Gemini API key is not configured' };
         } catch (error) {
             console.error('Error sending text:', error);
             return { success: false, error: error.message };

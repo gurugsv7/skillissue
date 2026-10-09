@@ -13,13 +13,7 @@ const { setupProviderRuntimeIpcHandlers, stopMacOSAudioCapture, sendToRenderer, 
 const storage = require('./storage');
 const { initTelegramBot, startPolling, stopPolling } = require('./utils/telegramBot');
 const { enforceIpcRateLimit } = require('./utils/abuseProtection');
-const {
-    sanitizeText,
-    ensureSafeUrl,
-    ensureFilePath,
-    ensureSafeFilename,
-    ensurePlainObject,
-} = require('./utils/inputValidation');
+const { sanitizeText, ensureSafeUrl, ensureFilePath, ensureSafeFilename, ensurePlainObject } = require('./utils/inputValidation');
 
 let autoUpdater = null;
 try {
@@ -31,6 +25,19 @@ try {
 const providerSessionRef = { current: null };
 let mainWindow = null;
 let telegramPollingActive = false;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+    });
+}
+
 const IPC_RATE_POLICIES = {
     historyRead: {
         windowMs: 60 * 1000,
@@ -141,6 +148,8 @@ function setupAutoUpdates() {
 }
 
 app.whenReady().then(async () => {
+    if (!hasSingleInstanceLock) return;
+
     cleanupLegacyWindowsUninstallEntries();
 
     // Initialize storage (checks version, resets if needed)
@@ -152,7 +161,8 @@ app.whenReady().then(async () => {
     if (telegramToken) {
         const botInitialized = initTelegramBot(telegramToken, telegramUserId, sendToRenderer);
         if (botInitialized) {
-            startPolling(2000, 
+            startPolling(
+                2000,
                 (base64, caption, metadata) => {
                     if (mainWindow) {
                         mainWindow.webContents.send('telegram-image-received', {
@@ -320,7 +330,7 @@ function setupStorageIpcHandlers() {
         }
     });
 
-    // ============ AZURE ============
+    // ============ AZURE SPEECH (STT) + GEMINI MODEL ============
     ipcMain.handle('storage:get-azure-api-key', async () => {
         try {
             return { success: true, data: storage.getAzureApiKey() };
@@ -359,21 +369,21 @@ function setupStorageIpcHandlers() {
         }
     });
 
-    ipcMain.handle('storage:get-azure-deployment', async () => {
+    ipcMain.handle('storage:get-gemini-model', async () => {
         try {
-            return { success: true, data: storage.getAzureDeployment() };
+            return { success: true, data: storage.getGeminiModel() };
         } catch (error) {
-            console.error('Error getting Azure deployment:', error);
+            console.error('Error getting Gemini model:', error);
             return { success: false, error: error.message };
         }
     });
 
-    ipcMain.handle('storage:set-azure-deployment', async (event, azureDeployment) => {
+    ipcMain.handle('storage:set-gemini-model', async (event, geminiModel) => {
         try {
-            storage.setAzureDeployment(azureDeployment);
+            storage.setGeminiModel(geminiModel);
             return { success: true };
         } catch (error) {
-            console.error('Error setting Azure deployment:', error);
+            console.error('Error setting Gemini model:', error);
             return { success: false, error: error.message };
         }
     });
@@ -552,7 +562,7 @@ function setupGeneralIpcHandlers() {
             const safeUrl = ensureSafeUrl(url, {
                 fieldName: 'external URL',
                 protocols: ['https:', 'http:', 'mailto:'],
-                allowLocalhost: true,
+                allowLocalhost: false,
             });
             await shell.openExternal(safeUrl);
             return { success: true };
@@ -680,7 +690,6 @@ function setupGeneralIpcHandlers() {
 
             // Use the standard image analysis pipeline via providerRuntime
             // This will leverage existing send-image-content handler
-            const { ipcRenderer } = require('electron');
             if (mainWindow && mainWindow.webContents) {
                 // Forward to renderer to use existing image analysis
                 mainWindow.webContents.send('telegram-image-received', {

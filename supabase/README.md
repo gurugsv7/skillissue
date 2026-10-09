@@ -1,6 +1,6 @@
 # Supabase backend setup for access-token auth
 
-This app now expects **access tokens** on the client. Provider keys (Gemini/Groq/Azure) are resolved server-side through a Supabase Edge Function.
+This app now expects **access tokens** on the client. Provider keys (Gemini/Groq) are resolved server-side through a Supabase Edge Function.
 
 ## 1) Apply migration
 
@@ -34,11 +34,12 @@ Set environment variables before running/packaging the app:
 
 Optional managed-provider env vars for `issue-download-key` (if not set, function falls back to latest `provider_secrets` row):
 
-- `HINTIO_MANAGED_GEMINI_API_KEY`
+- `HINTIO_MANAGED_GEMINI_API_KEY` (required — the LLM for answers, vision and calibration)
+- `HINTIO_MANAGED_GEMINI_API_KEYS` (optional — extra Gemini keys, comma separated. Each free-tier key allows ~10 requests/minute, so keys from separate Google accounts multiply the ceiling. The client spreads requests across them and fails over instantly on a 429 with no backoff.)
+- `HINTIO_MANAGED_GEMINI_MODEL` (optional, defaults to `gemini-3.7-flash`; must be a free-tier Flash/Flash-Lite model to stay free)
 - `HINTIO_MANAGED_GROQ_API_KEY`
-- `HINTIO_MANAGED_AZURE_API_KEY`
-- `HINTIO_MANAGED_AZURE_ENDPOINT`
-- `HINTIO_MANAGED_AZURE_DEPLOYMENT`
+- `HINTIO_MANAGED_AZURE_API_KEY` (optional — Azure Speech STT fallback only)
+- `HINTIO_MANAGED_AZURE_ENDPOINT` (optional — Azure Speech STT fallback only)
 - `HINTIO_MANAGED_CLOUD_TOKEN`
 
 ## 4) Create access token records
@@ -48,7 +49,7 @@ Store **SHA-256 hash** of each token in `public.access_tokens.token_hash`.
 Example hash generation (Node.js):
 
 ```js
-require('crypto').createHash('sha256').update('your-access-token').digest('hex')
+require('crypto').createHash('sha256').update('your-access-token').digest('hex');
 ```
 
 Insert matching secret row in `public.provider_secrets`.
@@ -59,7 +60,7 @@ Insert matching secret row in `public.provider_secrets`.
 - Token validation + key resolution happen in the edge function using `service_role`.
 - Non-consuming preflight requests (`consume: false`) validate token status but do **not** return provider secrets.
 - Provider secrets are issued only on credit-consuming requests (`consume: true`) via `consume_interview_credit`.
-- Edge function now requires `Authorization: Bearer <SKI-...>` and validates `apikey` header against `SUPABASE_ANON_KEY` when configured.
+- Edge function requires `Authorization: Bearer <access-token>`; both generated `SKI-` tokens and approved custom tokens are supported. It also validates the `apikey` header against `SUPABASE_ANON_KEY` when configured.
 - Tables and RPC execution are hardened to `service_role` only via RLS policies and grants.
 - Optional `pg_cron` job cleans up expired tokens every 6 hours when extension is available.
 

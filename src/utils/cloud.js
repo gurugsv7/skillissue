@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const { BrowserWindow } = require('electron');
 const { sanitizeText, ensureProfile } = require('./inputValidation');
 const { formatSpokenInterviewAnswer } = require('./answerFormatting');
+const { isInterviewProfile, classifyInterviewQuestion } = require('./interviewProfiles');
 
 let cloudWs = null;
 let isCloudConnected = false;
@@ -26,7 +27,9 @@ function setOnTurnComplete(callback) {
 function connectCloud(token, profile, userContext) {
     // Close existing connection
     if (cloudWs) {
-        try { cloudWs.close(); } catch (e) {}
+        try {
+            cloudWs.close();
+        } catch (e) {}
         cloudWs = null;
         isCloudConnected = false;
     }
@@ -54,7 +57,7 @@ function connectCloud(token, profile, userContext) {
         });
 
         const url = `wss://api.hintio.com/ws?token=${encodeURIComponent(safeToken)}`;
-        console.log('[Cloud] Connecting to', url);
+        console.log('[Cloud] Connecting to api.hintio.com');
 
         cloudWs = new WebSocket(url);
 
@@ -83,7 +86,7 @@ function connectCloud(token, profile, userContext) {
             resolve(true);
         });
 
-        cloudWs.on('message', (data) => {
+        cloudWs.on('message', data => {
             try {
                 const msg = JSON.parse(data.toString());
                 handleMessage(msg);
@@ -99,7 +102,7 @@ function connectCloud(token, profile, userContext) {
             clearTimeout(timeout);
         });
 
-        cloudWs.on('error', (err) => {
+        cloudWs.on('error', err => {
             console.error('[Cloud] WebSocket error:', err.message);
             isCloudConnected = false;
             clearTimeout(timeout);
@@ -129,7 +132,9 @@ function handleMessage(msg) {
             currentCloudResponse += msg.text;
             sendToRenderer(
                 isFirstChunk ? 'new-response' : 'update-response',
-                (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(currentCloudResponse) : currentCloudResponse
+                isInterviewProfile(currentProfile)
+                    ? formatSpokenInterviewAnswer(currentCloudResponse, classifyInterviewQuestion(currentTranscription))
+                    : currentCloudResponse
             );
             isFirstChunk = false;
             break;
@@ -137,7 +142,9 @@ function handleMessage(msg) {
         case 'response_end':
             if (onTurnComplete && currentCloudResponse.trim()) {
                 const savedResponse =
-                    (currentProfile === 'interview' || currentProfile === 'frontend-interview') ? formatSpokenInterviewAnswer(currentCloudResponse) : currentCloudResponse;
+                    isInterviewProfile(currentProfile)
+                        ? formatSpokenInterviewAnswer(currentCloudResponse, classifyInterviewQuestion(currentTranscription))
+                        : currentCloudResponse;
                 onTurnComplete(currentTranscription, savedResponse);
             }
             currentTranscription = '';
@@ -164,7 +171,7 @@ function sendCloudAudio(pcmBuffer) {
         return;
     }
 
-    cloudWs.send(pcmBuffer, { binary: true }, (err) => {
+    cloudWs.send(pcmBuffer, { binary: true }, err => {
         if (err) {
             console.error('[Cloud] Audio send error:', err.message);
         }
@@ -176,10 +183,12 @@ function sendCloudAudio(pcmBuffer) {
 
 function sendCloudText(text) {
     if (cloudWs && isCloudConnected && cloudWs.readyState === WebSocket.OPEN) {
-        cloudWs.send(JSON.stringify({
-            type: 'test_text',
-            text: text
-        }));
+        cloudWs.send(
+            JSON.stringify({
+                type: 'test_text',
+                text: text,
+            })
+        );
     }
 }
 
@@ -187,10 +196,12 @@ function sendCloudImage(base64Data) {
     if (!cloudWs || !isCloudConnected || cloudWs.readyState !== WebSocket.OPEN) {
         return false;
     }
-    cloudWs.send(JSON.stringify({
-        type: 'image',
-        image: base64Data
-    }));
+    cloudWs.send(
+        JSON.stringify({
+            type: 'image',
+            image: base64Data,
+        })
+    );
     return true;
 }
 

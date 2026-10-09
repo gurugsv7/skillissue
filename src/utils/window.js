@@ -1,4 +1,4 @@
-const { BrowserWindow, globalShortcut, ipcMain, screen } = require('electron');
+const { BrowserWindow, globalShortcut, ipcMain, screen, shell } = require('electron');
 const path = require('node:path');
 const storage = require('../storage');
 const { setWindowAsTopmost, enforceWindowOnTop, forceWindowToFront } = require('./windowsNativeApi');
@@ -47,7 +47,9 @@ function registerGlobalShortcut(action, keybind, handler) {
 function dispatchRendererShortcut(mainWindow, shortcutKey) {
     if (!mainWindow || mainWindow.isDestroyed()) return;
 
-    mainWindow.webContents.executeJavaScript(`
+    mainWindow.webContents
+        .executeJavaScript(
+            `
         (() => {
             if (window.hintio && typeof window.hintio.handleShortcut === 'function') {
                 window.hintio.handleShortcut(${JSON.stringify(shortcutKey)});
@@ -55,9 +57,11 @@ function dispatchRendererShortcut(mainWindow, shortcutKey) {
                 console.warn('[SHORTCUT] window.hintio.handleShortcut unavailable for:', ${JSON.stringify(shortcutKey)});
             }
         })();
-    `).catch((error) => {
-        console.error('[SHORTCUT] Failed to dispatch shortcut to renderer:', error);
-    });
+    `
+        )
+        .catch(error => {
+            console.error('[SHORTCUT] Failed to dispatch shortcut to renderer:', error);
+        });
 }
 
 function createWindow(sendToRenderer, providerSessionRef) {
@@ -81,8 +85,10 @@ function createWindow(sendToRenderer, providerSessionRef) {
         skipTaskbar: !visibleMode,
         maximizable: false,
         webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false, // TODO: change to true
+            preload: path.join(__dirname, '../preload.js'),
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
             backgroundThrottling: false,
             enableBlinkFeatures: 'GetDisplayMedia',
             webSecurity: true,
@@ -127,14 +133,14 @@ function createWindow(sendToRenderer, providerSessionRef) {
 
     if (!visibleMode && process.platform === 'win32') {
         mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
-        
+
         // Try wrapper approach for additional safety
         try {
             setWindowAsTopmost(mainWindow);
         } catch (error) {
             console.warn('[Window] Initial topmost set via wrapper failed:', error.message);
         }
-        
+
         // For Mettl Secure Browser and other high-security environments,
         // periodically re-assert the window's top position since they may
         // aggressively manage z-order and hide overlays
@@ -147,7 +153,7 @@ function createWindow(sendToRenderer, providerSessionRef) {
                 }
             }
         }, 500); // 500ms interval for aggressive enforcement
-        
+
         // Clean up interval on window close
         mainWindow.on('closed', () => {
             clearInterval(ensureWindowOnTopInterval);
@@ -155,6 +161,24 @@ function createWindow(sendToRenderer, providerSessionRef) {
     }
 
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
+
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        try {
+            const parsed = new URL(url);
+            if (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'mailto:') {
+                void shell.openExternal(parsed.toString());
+            }
+        } catch (error) {
+            console.warn('[Window] Blocked invalid external URL:', error.message);
+        }
+        return { action: 'deny' };
+    });
+
+    mainWindow.webContents.once('did-finish-load', () => {
+        mainWindow.webContents.on('will-navigate', event => {
+            event.preventDefault();
+        });
+    });
 
     // After window is created, initialize keybinds
     mainWindow.webContents.once('dom-ready', () => {
@@ -642,13 +666,13 @@ function setupWindowIpcHandlers(mainWindow, sendToRenderer, providerSessionRef) 
         const [minWidth, minHeight] = mainWindow.getMinimumSize();
         if (newWidth < minWidth) {
             if (edge.includes('l')) {
-                newX -= (minWidth - newWidth);
+                newX -= minWidth - newWidth;
             }
             newWidth = minWidth;
         }
         if (newHeight < minHeight) {
             if (edge.includes('t')) {
-                newY -= (minHeight - newHeight);
+                newY -= minHeight - newHeight;
             }
             newHeight = minHeight;
         }
