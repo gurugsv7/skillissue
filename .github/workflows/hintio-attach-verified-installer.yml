@@ -1,0 +1,31 @@
+name: Attach verified Hintio installer to draft
+on:
+    push:
+        branches:
+            - hintio/1.0.11-installer-attach
+
+permissions:
+    actions: read
+    contents: write
+
+jobs:
+    attach:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 12
+        steps:
+            - name: Retrieve the successful Windows build
+              uses: actions/download-artifact@v4
+              with:
+                  name: hintio-1.0.11-windows-installer
+                  run-id: 45163717868
+                  github-token: ${{ github.token }}
+                  path: verified-installer
+            - name: Verify and attach files without publishing
+              working-directory: verified-installer
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  sha256sum -c SHA256SUMS.txt
+                  file Hintio-1.0.11.Setup.exe
+                  test "$(gh release view v1.0.11-preview.1 --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+                  gh release upload v1.0.11-preview.1 Hintio-1.0.11.Setup.exe SHA256SUMS.txt --repo "$GITHUB_REPOSITORY"
