@@ -1,0 +1,69 @@
+name: Build Hintio Windows preview
+on:
+    push:
+        branches:
+            - hintio/1.0.11-installer-build
+
+permissions:
+    contents: read
+
+jobs:
+    installer:
+        runs-on: windows-2025
+        timeout-minutes: 25
+        env:
+            ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+            SUPABASE_URL: http://127.0.0.1:1
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: '22'
+                  cache: npm
+            - name: Install dependencies
+              run: npm ci --no-audit --no-fund
+            - name: Check desktop code
+              run: |
+                  npm run typecheck
+                  npm test
+            - name: Build and verify the Squirrel installer
+              run: npm run make:win
+            - name: Smoke-test a clean installation
+              shell: pwsh
+              run: |
+                  $installer = Resolve-Path "out/release-manual-1.0.11/Hintio-1.0.11.Setup.exe"
+                  $process = Start-Process -FilePath $installer -ArgumentList "--silent" -PassThru
+                  if (-not $process.WaitForExit(180000)) {
+                      Stop-Process -Id $process.Id -Force
+                      throw "The Squirrel installer timed out."
+                  }
+                  if ($process.ExitCode -ne 0) {
+                      throw "The Squirrel installer exited with code $($process.ExitCode)."
+                  }
+                  $app = Join-Path $env:LOCALAPPDATA "Hintio/app-1.0.11/Hintio.exe"
+                  if (-not (Test-Path $app)) {
+                      throw "The installer did not lay down Hintio 1.0.11."
+                  }
+                  $version = (Get-Item $app).VersionInfo.ProductVersion
+                  if ($version -notmatch '^1\.0\.11(?:\.0)?$') {
+                      throw "Installed executable reports unexpected version $version."
+                  }
+                  $existing = Get-Process -Name Hintio -ErrorAction SilentlyContinue
+                  if ($existing) {
+                      $existing | Stop-Process -Force
+                      $existing | Wait-Process -ErrorAction SilentlyContinue
+                  }
+                  $running = Start-Process -FilePath $app -PassThru
+                  if ($running.WaitForExit(8000)) {
+                      throw "Hintio exited during the clean-launch smoke test with code $($running.ExitCode)."
+                  }
+                  Stop-Process -Id $running.Id -Force
+            - name: Retain verified installer and checksum
+              uses: actions/upload-artifact@v4
+              with:
+                  name: hintio-1.0.11-windows-installer
+                  path: |
+                      out/release-manual-1.0.11/Hintio-1.0.11.Setup.exe
+                      out/release-manual-1.0.11/SHA256SUMS.txt
+                  if-no-files-found: error
+                  retention-days: 2
